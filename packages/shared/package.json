@@ -1,0 +1,29 @@
+{
+  "name": "@outreach/shared",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./types/*": {
+      "import": "./dist/types/*",
+      "types": "./dist/types/*"
+    },
+    "./utils/*": {
+      "import": "./dist/utils/*",
+      "types": "./dist/utils/*"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.3"
+  }
+}

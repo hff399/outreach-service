@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+.next/
+out/
+build/
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+coverage/
+.nyc_output/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Telegram sessions (sensitive!)
+apps/backend/sessions/*.session
+apps/backend/sessions/*.json
+!apps/backend/sessions/.gitkeep
+
+# Supabase
+.supabase/
+
+# PM2
+.pm2/
+
+# TypeScript
+*.tsbuildinfo
+
+# Misc
+.vercel
+.turbo

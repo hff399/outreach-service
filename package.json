@@ -1,0 +1,28 @@
+{
+  "name": "outreach-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram outreach automation service",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspaces --if-present",
+    "dev:backend": "npm run dev --workspace=apps/backend",
+    "dev:frontend": "npm run dev --workspace=apps/frontend",
+    "build": "npm run build --workspaces --if-present",
+    "build:backend": "npm run build --workspace=apps/backend",
+    "build:frontend": "npm run build --workspace=apps/frontend",
+    "start": "npm run start --workspaces --if-present",
+    "start:backend": "npm run start --workspace=apps/backend",
+    "start:frontend": "npm run start --workspace=apps/frontend",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "db:generate-types": "supabase gen types typescript --project-id $SUPABASE_PROJECT_ID > packages/shared/src/types/supabase.ts",
+    "db:migrate": "supabase db push"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

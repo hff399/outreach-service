@@ -1,0 +1,131 @@
+name: Deploy to Timeweb VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build --workspace=packages/shared
+
+      - name: Build backend
+        run: npm run build --workspace=apps/backend
+
+      - name: Build frontend
+        run: npm run build --workspace=apps/frontend
+
+      - name: Upload backend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-dist
+          path: |
+            apps/backend/dist
+            apps/backend/package.json
+            apps/backend/ecosystem.config.cjs
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: |
+            apps/frontend/.next
+            apps/frontend/public
+            apps/frontend/package.json
+            apps/frontend/next.config.js
+
+      - name: Upload shared artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-dist
+          path: |
+            packages/shared/dist
+            packages/shared/package.json
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download backend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-dist
+          path: apps/backend
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: apps/frontend
+
+      - name: Download shared artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: shared-dist
+          path: packages/shared
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to server
+        run: |
+          # Create deployment directory
+          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "mkdir -p ~/outreach-service"
+
+          # Sync files
+          rsync -avz --delete \
+            --exclude 'node_modules' \
+            --exclude '.git' \
+            --exclude 'sessions' \
+            --exclude 'uploads' \
+            --exclude '.env' \
+            --exclude 'logs' \
+            ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:~/outreach-service/
+
+          # Install dependencies and restart services
+          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
+            cd ~/outreach-service
+
+            # Install production dependencies
+            npm ci --omit=dev
+
+            # Create necessary directories
+            mkdir -p apps/backend/sessions apps/backend/uploads apps/backend/logs
+
+            # Restart backend with PM2
+            cd apps/backend
+            pm2 stop outreach-backend 2>/dev/null || true
+            pm2 start ecosystem.config.cjs --env production
+            pm2 save
+
+            # Restart frontend with PM2
+            cd ../frontend
+            pm2 stop outreach-frontend 2>/dev/null || true
+            pm2 start ecosystem.config.cjs --env production
+            pm2 save
+
+            echo "Deployment completed successfully!"
+          ENDSSH
