@@ -85,9 +85,9 @@ jobs:
             # Build shared package
             npm run build --workspace=packages/shared
 
-            # Build frontend with production env vars (through nginx, no port)
-            NEXT_PUBLIC_BACKEND_URL=http://147.45.153.169 \
-            NEXT_PUBLIC_WS_URL=ws://147.45.153.169 \
+            # Build frontend with production env vars (direct to backend port)
+            NEXT_PUBLIC_BACKEND_URL=http://147.45.153.169:3001 \
+            NEXT_PUBLIC_WS_URL=ws://147.45.153.169:3001 \
             npm run build --workspace=apps/frontend
 
             # Create necessary directories
