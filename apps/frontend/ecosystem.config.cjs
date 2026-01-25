@@ -2,11 +2,12 @@ module.exports = {
   apps: [
     {
       name: 'outreach-frontend',
-      script: 'node_modules/.bin/next',
-      args: 'start',
+      script: 'npx',
+      args: 'next start',
       cwd: __dirname,
       instances: 1,
       exec_mode: 'fork',
+      interpreter: 'none',
       env: {
         NODE_ENV: 'development',
         PORT: 3000,
