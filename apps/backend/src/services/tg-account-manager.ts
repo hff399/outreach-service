@@ -2,6 +2,7 @@ import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
 import { NewMessage, NewMessageEvent } from 'telegram/events/index.js';
 import { Api } from 'telegram/tl/index.js';
+import bigInt from 'big-integer';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
@@ -453,8 +454,8 @@ export class TgAccountManager {
     if (accessHash) {
       try {
         peer = new Api.InputPeerUser({
-          userId: BigInt(userId),
-          accessHash: BigInt(accessHash),
+          userId: bigInt(userId),
+          accessHash: bigInt(accessHash),
         });
       } catch {
         // Fallback to string userId if BigInt conversion fails
@@ -485,8 +486,8 @@ export class TgAccountManager {
     if (accessHash) {
       try {
         peer = new Api.InputPeerUser({
-          userId: BigInt(userId),
-          accessHash: BigInt(accessHash),
+          userId: bigInt(userId),
+          accessHash: bigInt(accessHash),
         });
       } catch {
         peer = userId;
@@ -626,8 +627,8 @@ export class TgAccountManager {
       let peer: Api.TypeInputPeer;
       if (accessHash) {
         peer = new Api.InputPeerUser({
-          userId: BigInt(userId),
-          accessHash: BigInt(accessHash),
+          userId: bigInt(userId),
+          accessHash: bigInt(accessHash),
         });
       } else {
         // Without access_hash, try to get entity but don't fail if not found
@@ -663,8 +664,8 @@ export class TgAccountManager {
       let peer: Api.TypeInputPeer;
       if (accessHash) {
         peer = new Api.InputPeerUser({
-          userId: BigInt(userId),
-          accessHash: BigInt(accessHash),
+          userId: bigInt(userId),
+          accessHash: bigInt(accessHash),
         });
       } else {
         peer = await entry.client.getInputEntity(userId);

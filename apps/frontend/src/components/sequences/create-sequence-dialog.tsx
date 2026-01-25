@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { generateId } from '@/lib/utils';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Loader2,
@@ -143,7 +144,7 @@ export function CreateSequenceDialog({ open, onOpenChange }: CreateSequenceDialo
   const [timeoutMinutes, setTimeoutMinutes] = useState(60);
   const [triggerConditions, setTriggerConditions] = useState<TriggerCondition[]>([]);
   const [steps, setSteps] = useState<Step[]>([
-    { id: crypto.randomUUID(), type: 'message', message_type: 'text', content: '', delay_minutes: 0 },
+    { id: generateId(), type: 'message', message_type: 'text', content: '', delay_minutes: 0 },
   ]);
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
   const [newTag, setNewTag] = useState('');
@@ -248,7 +249,7 @@ export function CreateSequenceDialog({ open, onOpenChange }: CreateSequenceDialo
     setRegexPattern('');
     setTimeoutMinutes(60);
     setTriggerConditions([]);
-    setSteps([{ id: crypto.randomUUID(), type: 'message', message_type: 'text', content: '', delay_minutes: 0 }]);
+    setSteps([{ id: generateId(), type: 'message', message_type: 'text', content: '', delay_minutes: 0 }]);
     setSelectedAccounts([]);
   };
 
@@ -271,7 +272,7 @@ export function CreateSequenceDialog({ open, onOpenChange }: CreateSequenceDialo
 
   const addStep = (type: StepType = 'message') => {
     const newStep: Step = {
-      id: crypto.randomUUID(),
+      id: generateId(),
       type,
       delay_minutes: 1,
     };

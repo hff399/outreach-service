@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { generateId } from '@/lib/utils';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Plus, X, MessageSquare, Video, Mic, Image, FileText } from 'lucide-react';
 import {
@@ -103,7 +104,7 @@ export function EditSequenceDialog({ sequence, open, onOpenChange }: EditSequenc
       setRegexPattern(sequence.trigger.regex_pattern || '');
       setTimeoutMinutes(sequence.trigger.timeout_minutes || 60);
       setSteps(sequence.steps.map(s => ({
-        id: s.id || crypto.randomUUID(),
+        id: s.id || generateId(),
         type: 'message' as const,
         delay_minutes: s.delay_minutes || 0,
         message_type: s.message_type || 'text',
@@ -167,7 +168,7 @@ export function EditSequenceDialog({ sequence, open, onOpenChange }: EditSequenc
 
   const addStep = () => {
     setSteps([...steps, {
-      id: crypto.randomUUID(),
+      id: generateId(),
       type: 'message',
       delay_minutes: 1,
       message_type: 'text',
