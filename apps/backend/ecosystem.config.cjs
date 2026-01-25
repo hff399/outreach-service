@@ -1,9 +1,11 @@
+const path = require('path');
+
 module.exports = {
   apps: [
     {
       name: 'outreach-backend',
-      script: 'npx',
-      args: 'tsx src/index.ts',
+      script: path.resolve(__dirname, '../../node_modules/.bin/tsx'),
+      args: 'src/index.ts',
       cwd: __dirname,
       instances: 1, // Single instance for Telegram client management
       exec_mode: 'fork',

@@ -1,9 +1,11 @@
+const path = require('path');
+
 module.exports = {
   apps: [
     {
       name: 'outreach-frontend',
-      script: 'npx',
-      args: 'next start',
+      script: path.resolve(__dirname, '../../node_modules/.bin/next'),
+      args: 'start',
       cwd: __dirname,
       instances: 1,
       exec_mode: 'fork',
