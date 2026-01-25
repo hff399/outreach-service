@@ -2,10 +2,12 @@ module.exports = {
   apps: [
     {
       name: 'outreach-backend',
-      script: 'dist/index.js',
+      script: 'npx',
+      args: 'tsx src/index.ts',
       cwd: __dirname,
       instances: 1, // Single instance for Telegram client management
       exec_mode: 'fork',
+      interpreter: 'none',
       env: {
         NODE_ENV: 'development',
         BACKEND_PORT: 3001,
