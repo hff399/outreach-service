@@ -171,8 +171,8 @@ jobs:
             set -e
             cd ~/outreach-service
 
-            # Install production dependencies
-            npm ci --omit=dev
+            # Install dependencies
+            npm ci
 
             # Create necessary directories
             mkdir -p apps/backend/sessions apps/backend/uploads apps/backend/logs apps/frontend/logs
