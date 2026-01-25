@@ -321,6 +321,8 @@ export class TgAccountManager {
   }
 
   async startAuth(accountId: string, phone: string): Promise<{ phoneCodeHash: string }> {
+    logger.info(`Starting auth for account ${accountId}, phone: ${phone}`);
+
     // Get account to check for proxy config
     const { data: account } = await supabase
       .from('tg_accounts')
@@ -339,7 +341,10 @@ export class TgAccountManager {
 
     if (proxyConfig && proxyConfig.host && proxyConfig.type !== 'mtproto') {
       (clientOptions as Record<string, unknown>).agent = buildProxyAgent(proxyConfig);
+      logger.info(`Using proxy for auth: ${proxyConfig.host}:${proxyConfig.port}`);
     }
+
+    logger.info(`Creating TelegramClient with apiId: ${appConfig.telegram.apiId}`);
 
     const client = new TelegramClient(
       session,
@@ -348,8 +353,11 @@ export class TgAccountManager {
       clientOptions
     );
 
+    logger.info('Connecting to Telegram...');
     await client.connect();
+    logger.info('Connected to Telegram');
 
+    logger.info(`Sending auth code to ${phone}...`);
     const result = await client.invoke(
       new Api.auth.SendCode({
         phoneNumber: phone,
@@ -358,6 +366,7 @@ export class TgAccountManager {
         settings: new Api.CodeSettings({}),
       })
     );
+    logger.info(`Auth code sent, phoneCodeHash received`);
 
     // Store client temporarily for auth flow
     this.clients.set(accountId, {
