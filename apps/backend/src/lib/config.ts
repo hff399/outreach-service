@@ -1,7 +1,13 @@
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
 
-config({ path: '../../.env.local' });
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Load .env from backend root directory
+config({ path: resolve(__dirname, '../../.env') });
 
 const envSchema = z.object({
   // Server
