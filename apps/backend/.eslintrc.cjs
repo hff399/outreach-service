@@ -17,6 +17,8 @@ module.exports = {
   ],
   rules: {
     'no-unused-vars': 'off', // TypeScript handles this
+    'no-undef': 'off', // TypeScript handles this
+    'no-case-declarations': 'off',
   },
   ignorePatterns: ['dist', 'node_modules'],
 };
