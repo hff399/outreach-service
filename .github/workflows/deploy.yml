@@ -117,9 +117,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    environment:
-      name: production
-      url: https://${{ secrets.SERVER_HOST }}
+    environment: production
     concurrency:
       group: production-deploy
       cancel-in-progress: false
