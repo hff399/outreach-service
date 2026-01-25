@@ -9,7 +9,7 @@
     "start": "tsx src/index.ts",
     "start:pm2": "pm2 start ecosystem.config.cjs",
     "lint": "eslint src --ext .ts",
-    "test": "vitest"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@fastify/cors": "^9.0.1",
