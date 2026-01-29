@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { supabase } from '../lib/supabase.js';
-import type { CreateLeadRequest, UpdateLeadRequest, LeadFilters } from '@shared/types/api.js';
+import type { CreateLeadRequest, UpdateLeadRequest, LeadFilters } from '@outreach/shared/types/api.js';
 
 const createLeadSchema = z.object({
   tg_user_id: z.string().min(1),

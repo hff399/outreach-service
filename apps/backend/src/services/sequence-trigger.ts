@@ -1,7 +1,7 @@
 import { supabase } from '../lib/supabase.js';
 import { createLogger } from '../lib/logger.js';
 import { handleLeadReply } from './sequence-executor.js';
-import type { Sequence, Lead } from '@shared/types/entities.js';
+import type { Sequence, Lead } from '@outreach/shared/types/entities.js';
 
 const logger = createLogger('SequenceTrigger');
 

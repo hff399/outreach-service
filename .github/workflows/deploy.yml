@@ -1,144 +1,24 @@
-name: CI/CD Pipeline
+name: Deploy
 
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
-env:
-  NODE_VERSION: '20'
-
 jobs:
-  lint-and-test:
-    name: Lint & Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build shared package
-        run: npm run build --workspace=packages/shared
-
-      - name: Lint
-        run: npm run lint --workspaces --if-present
-
-      - name: Test
-        run: npm run test --workspaces --if-present
-
   deploy:
-    name: Deploy to Production
-    needs: lint-and-test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    environment: production
-    concurrency:
-      group: production-deploy
-      cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
-
       - name: Deploy to server
-        env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
-          SERVER_USER: ${{ secrets.SERVER_USER }}
-        run: |
-          set -e
-
-          # Sync source code (excluding build artifacts and local files)
-          rsync -avz --delete \
-            --exclude 'node_modules' \
-            --exclude '.git' \
-            --exclude '.next' \
-            --exclude 'dist' \
-            --exclude 'sessions' \
-            --exclude 'uploads' \
-            --exclude '.env' \
-            --exclude '.env.local' \
-            --exclude 'logs' \
-            ./ ${SERVER_USER}@${SERVER_HOST}:~/outreach-service/
-
-          # Build and restart on server
-          ssh ${SERVER_USER}@${SERVER_HOST} << 'ENDSSH'
-            set -e
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
             cd ~/outreach-service
-
-            # Install all dependencies
+            git pull origin main
             npm ci
-
-            # Build shared package
-            npm run build --workspace=packages/shared
-
-            # Build frontend with production env vars (direct to backend port)
-            NEXT_PUBLIC_BACKEND_URL=http://147.45.153.169:3001 \
-            NEXT_PUBLIC_WS_URL=ws://147.45.153.169:3001 \
-            npm run build --workspace=apps/frontend
-
-            # Create necessary directories
-            mkdir -p apps/backend/sessions apps/backend/uploads apps/backend/logs apps/frontend/logs
-
-            # Restart backend with PM2
-            cd apps/backend
-            pm2 stop outreach-backend 2>/dev/null || true
-            pm2 delete outreach-backend 2>/dev/null || true
-            pm2 start ecosystem.config.cjs --env production
-
-            # Restart frontend with PM2
-            cd ../frontend
-            pm2 stop outreach-frontend 2>/dev/null || true
-            pm2 delete outreach-frontend 2>/dev/null || true
-            pm2 start ecosystem.config.cjs --env production
-
-            # Save PM2 configuration
+            npm run build
+            pm2 restart outreach || pm2 start ecosystem.config.cjs --env production
             pm2 save
-
-            echo "Deployment completed successfully!"
-          ENDSSH
-
-      - name: Health check
-        env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
-          SERVER_USER: ${{ secrets.SERVER_USER }}
-        run: |
-          echo "Waiting for services to start..."
-          sleep 10
-
-          ssh ${SERVER_USER}@${SERVER_HOST} << 'ENDSSH'
-            set -e
-            echo "Checking PM2 processes..."
-            pm2 list
-
-            if pm2 show outreach-backend | grep -q "online"; then
-              echo "Backend is running"
-            else
-              echo "Backend failed to start"
-              pm2 logs outreach-backend --lines 50
-              exit 1
-            fi
-
-            if pm2 show outreach-frontend | grep -q "online"; then
-              echo "Frontend is running"
-            else
-              echo "Frontend failed to start"
-              pm2 logs outreach-frontend --lines 50
-              exit 1
-            fi
-
-            echo "All services are healthy!"
-          ENDSSH

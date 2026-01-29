@@ -1,7 +1,7 @@
 import { supabase } from '../lib/supabase.js';
 import { createLogger } from '../lib/logger.js';
 import { tgManager } from '../index.js';
-import type { Sequence, SequenceEnrollment, Lead } from '@shared/types/entities.js';
+import type { Sequence, SequenceEnrollment, Lead } from '@outreach/shared/types/entities.js';
 
 const logger = createLogger('SequenceExecutor');
 

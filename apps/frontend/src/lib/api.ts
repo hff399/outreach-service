@@ -1,4 +1,5 @@
-const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
+// In production, API is served from same origin. In dev, use proxy or localhost.
+const API_URL = '';
 
 type RequestOptions = {
   method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
@@ -56,6 +57,9 @@ export const accountsApi = {
   startAuth: (id: string) => request<{ phoneCodeHash: string }>(`/api/accounts/${id}/auth/start`, { method: 'POST' }),
   completeAuth: (id: string, data: { code: string; phone_code_hash: string; password?: string }) =>
     request<{ authenticated: boolean }>(`/api/accounts/${id}/auth/complete`, { method: 'POST', body: data }),
+  startQrAuth: (id: string) => request<{ qrUrl: string; expiresAt: number }>(`/api/accounts/${id}/auth/qr/start`, { method: 'POST' }),
+  pollQrAuth: (id: string) => request<{ status: 'waiting' | 'success' | '2fa_required'; qrUrl?: string; expiresAt?: number }>(`/api/accounts/${id}/auth/qr/poll`, { method: 'POST' }),
+  completeQr2FA: (id: string, password: string) => request<{ authenticated: boolean }>(`/api/accounts/${id}/auth/qr/2fa`, { method: 'POST', body: { password } }),
   reconnect: (id: string) => request<{ connected: boolean }>(`/api/accounts/${id}/reconnect`, { method: 'POST' }),
   health: () => request<{ accounts: unknown[] }>('/api/accounts/health/all'),
 };
@@ -67,8 +71,9 @@ export const campaignsApi = {
   create: (data: unknown) => request<unknown>('/api/campaigns', { method: 'POST', body: data }),
   update: (id: string, data: unknown) => request<unknown>(`/api/campaigns/${id}`, { method: 'PATCH', body: data }),
   delete: (id: string) => request<null>(`/api/campaigns/${id}`, { method: 'DELETE' }),
-  start: (id: string) => request<unknown>(`/api/campaigns/${id}/start`, { method: 'POST' }),
+  start: (id: string) => request<{ message?: string }>(`/api/campaigns/${id}/start`, { method: 'POST' }),
   pause: (id: string) => request<unknown>(`/api/campaigns/${id}/pause`, { method: 'POST' }),
+  restart: (id: string) => request<{ message?: string }>(`/api/campaigns/${id}/restart`, { method: 'POST' }),
   addGroups: (id: string, groupIds: string[]) =>
     request<{ added: number }>(`/api/campaigns/${id}/groups`, { method: 'POST', body: { group_ids: groupIds } }),
   getGroups: (id: string) => request<unknown[]>(`/api/campaigns/${id}/groups`),
@@ -174,7 +179,7 @@ export const uploadsApi = {
       formData.append('video_note', 'true');
     }
 
-    const res = await fetch(`${API_URL}/api/uploads/media`, {
+    const res = await fetch('/api/uploads/media', {
       method: 'POST',
       body: formData,
     });
@@ -191,5 +196,5 @@ export const uploadsApi = {
     return data.data;
   },
 
-  getMediaUrl: (path: string) => `${API_URL}${path}`,
+  getMediaUrl: (path: string) => path,
 };

@@ -99,10 +99,12 @@ export function CreateCampaignDialog({ open, onOpenChange }: CreateCampaignDialo
       }
 
       // Create campaign
+      const hasTemplate = templateId && templateId !== 'custom' && templateId !== 'none';
       const campaign = await campaignsApi.create({
         name,
         description: description || undefined,
-        message_template_id: templateId && templateId !== 'custom' && templateId !== 'none' ? templateId : undefined,
+        message_template_id: hasTemplate ? templateId : undefined,
+        custom_message: !hasTemplate && customMessage ? customMessage : undefined,
         schedule_config: {
           type: 'immediate',
           min_delay_seconds: minDelaySec,

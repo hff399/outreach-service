@@ -111,4 +111,19 @@ export class JobScheduler {
   async pauseCampaign(campaignId: string): Promise<void> {
     await this.campaignService.pauseCampaign(campaignId);
   }
+
+  // Validate campaign before starting
+  async validateCampaign(campaignId: string) {
+    return this.campaignService.validateCampaign(campaignId);
+  }
+
+  // Restart campaign - reset all groups to pending
+  async restartCampaign(campaignId: string) {
+    return this.campaignService.restartCampaign(campaignId);
+  }
+
+  // Check if campaign is running
+  isCampaignRunning(campaignId: string): boolean {
+    return this.campaignService.isRunning(campaignId);
+  }
 }

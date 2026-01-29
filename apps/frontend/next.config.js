@@ -1,8 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  output: 'export',
+  trailingSlash: true,
   transpilePackages: ['@outreach/shared'],
-  experimental: {
-    serverComponentsExternalPackages: ['@supabase/ssr'],
+  images: {
+    unoptimized: true,
   },
 };
 

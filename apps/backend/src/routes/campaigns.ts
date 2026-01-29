@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { supabase } from '../lib/supabase.js';
 import { jobScheduler } from '../index.js';
-import type { CreateCampaignRequest, UpdateCampaignRequest } from '@shared/types/api.js';
+import type { CreateCampaignRequest, UpdateCampaignRequest } from '@outreach/shared/types/api.js';
 
 const scheduleConfigSchema = z.object({
   type: z.enum(['immediate']).default('immediate'),
@@ -16,6 +16,7 @@ const createCampaignSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   message_template_id: z.string().uuid().optional(),
+  custom_message: z.string().optional(),
   schedule_config: scheduleConfigSchema,
   group_filter: z.object({
     include_group_ids: z.array(z.string().uuid()).optional(),
@@ -182,6 +183,19 @@ export async function campaignsRoutes(fastify: FastifyInstance) {
   fastify.post('/:id/start', async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
     const { id } = request.params;
 
+    // Validate campaign can be started
+    const validation = await jobScheduler.validateCampaign(id);
+    if (!validation.success) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'CAMPAIGN_INVALID',
+          message: validation.error,
+          details: validation.details,
+        },
+      });
+    }
+
     // Update status to active
     const { data: campaign, error } = await supabase
       .from('campaigns')
@@ -195,9 +209,41 @@ export async function campaignsRoutes(fastify: FastifyInstance) {
     }
 
     // Trigger campaign execution immediately
-    jobScheduler.triggerCampaign(id).catch(console.error);
+    jobScheduler.triggerCampaign(id).catch((err) => {
+      console.error('Campaign execution failed:', err);
+    });
 
-    return { success: true, data: campaign };
+    return {
+      success: true,
+      data: campaign,
+      message: `Campaign started with ${validation.details?.totalGroups} groups, ${validation.details?.connectedAccounts} accounts`,
+    };
+  });
+
+  // Restart campaign - reset all groups to pending and set to draft
+  fastify.post('/:id/restart', async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    const { id } = request.params;
+
+    try {
+      const result = await jobScheduler.restartCampaign(id);
+
+      const { data: campaign } = await supabase
+        .from('campaigns')
+        .select('*')
+        .eq('id', id)
+        .single();
+
+      return {
+        success: true,
+        data: campaign,
+        message: `Campaign reset, ${result.reset} groups set to pending`,
+      };
+    } catch (err) {
+      return reply.status(500).send({
+        success: false,
+        error: { code: 'RESTART_FAILED', message: (err as Error).message },
+      });
+    }
   });
 
   // Pause campaign

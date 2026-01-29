@@ -345,13 +345,14 @@ export function CreateSequenceDialog({ open, onOpenChange }: CreateSequenceDialo
   const isStepValid = (step: Step): boolean => {
     switch (step.type) {
       case 'message':
-        return !!step.content;
+        // Allow empty content - user can fill it in later
+        return true;
       case 'status_change':
         return !!step.status_id;
       case 'reminder':
-        return !!step.reminder?.title && !!step.reminder?.due_minutes;
+        return !!step.reminder?.title;
       case 'tag':
-        return (step.tags_to_add?.length || 0) > 0 || (step.tags_to_remove?.length || 0) > 0;
+        return true; // Tags are optional
       case 'assign':
         return !!step.assign_to_account_id;
       case 'webhook':
@@ -359,11 +360,12 @@ export function CreateSequenceDialog({ open, onOpenChange }: CreateSequenceDialo
       case 'wait':
         return !!step.wait_condition?.type;
       default:
-        return false;
+        return true;
     }
   };
 
-  const canCreate = name && steps.every(isStepValid) && selectedAccounts.length > 0;
+  // Only require name and at least one account
+  const canCreate = name.trim().length > 0 && selectedAccounts.length > 0;
 
   const renderStepConfig = (step: Step) => {
     switch (step.type) {

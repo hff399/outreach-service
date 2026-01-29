@@ -1,8 +1,8 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { supabase } from '../lib/supabase.js';
-import { parseTemplateVariables } from '@shared/utils/index.js';
-import type { CreateTemplateRequest, UpdateTemplateRequest } from '@shared/types/api.js';
+import { parseTemplateVariables } from '@outreach/shared/utils/index.js';
+import type { CreateTemplateRequest, UpdateTemplateRequest } from '@outreach/shared/types/api.js';
 
 const createTemplateSchema = z.object({
   name: z.string().min(1),

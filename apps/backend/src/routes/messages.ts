@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { join } from 'path';
 import { supabase } from '../lib/supabase.js';
 import { tgManager, wsHub } from '../index.js';
-import type { SendMessageRequest } from '@shared/types/api.js';
+import type { SendMessageRequest } from '@outreach/shared/types/api.js';
 
 // Convert URL path to filesystem path
 function resolveMediaPath(urlPath: string): string {

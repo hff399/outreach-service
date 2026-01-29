@@ -5,6 +5,7 @@ import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { existsSync } from 'fs';
 
 import { appConfig } from './lib/config.js';
 import { logger } from './lib/logger.js';
@@ -27,6 +28,9 @@ import { uploadsRoutes } from './routes/uploads.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// Path to frontend static build (relative to apps/backend/src -> apps/frontend/out)
+const FRONTEND_BUILD_PATH = join(__dirname, '../../frontend/out');
 
 const fastify = Fastify({
   logger: appConfig.isDev,
@@ -55,13 +59,6 @@ async function start() {
       },
     });
 
-    // Static file serving for uploads
-    await fastify.register(fastifyStatic, {
-      root: join(__dirname, '../uploads'),
-      prefix: '/uploads/',
-      decorateReply: true,
-    });
-
     // Health check
     fastify.get('/health', async () => {
       const accountsHealth = await tgManager.getHealthStatus();
@@ -72,7 +69,7 @@ async function start() {
       };
     });
 
-    // Register routes
+    // Register API routes first (before static files)
     await fastify.register(accountsRoutes, { prefix: '/api/accounts' });
     await fastify.register(campaignsRoutes, { prefix: '/api/campaigns' });
     await fastify.register(sequencesRoutes, { prefix: '/api/sequences' });
@@ -83,6 +80,51 @@ async function start() {
     await fastify.register(statusesRoutes, { prefix: '/api/statuses' });
     await fastify.register(uploadsRoutes, { prefix: '/api/uploads' });
     await fastify.register(wsRoutes, { prefix: '/ws' });
+
+    // Static file serving for uploads
+    await fastify.register(fastifyStatic, {
+      root: join(__dirname, '../uploads'),
+      prefix: '/uploads/',
+      decorateReply: true,
+    });
+
+    // Serve frontend static files (if build exists)
+    if (existsSync(FRONTEND_BUILD_PATH)) {
+      // Register static serving for _next assets
+      await fastify.register(fastifyStatic, {
+        root: join(FRONTEND_BUILD_PATH, '_next'),
+        prefix: '/_next/',
+        decorateReply: false,
+      });
+
+      // Serve index.html at root
+      fastify.get('/', async (request, reply) => {
+        return reply.sendFile('index.html', FRONTEND_BUILD_PATH);
+      });
+
+      // Serve page-specific HTML for each route
+      const pages = ['accounts', 'campaigns', 'crm', 'groups', 'leads', 'sequences', 'settings', 'templates'];
+      for (const page of pages) {
+        fastify.get(`/${page}`, async (request, reply) => {
+          return reply.sendFile(`${page}/index.html`, FRONTEND_BUILD_PATH);
+        });
+        fastify.get(`/${page}/`, async (request, reply) => {
+          return reply.sendFile(`${page}/index.html`, FRONTEND_BUILD_PATH);
+        });
+      }
+
+      logger.info(`Serving frontend from ${FRONTEND_BUILD_PATH}`);
+
+      // SPA fallback for other routes
+      fastify.setNotFoundHandler(async (request, reply) => {
+        if (request.url.startsWith('/api/') || request.url.startsWith('/ws') || request.url.startsWith('/uploads/')) {
+          return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Not found' } });
+        }
+        return reply.sendFile('index.html', FRONTEND_BUILD_PATH);
+      });
+    } else {
+      logger.warn(`Frontend build not found at ${FRONTEND_BUILD_PATH}`);
+    }
 
     // Initialize TG accounts
     logger.info('Initializing Telegram accounts...');

@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { supabase } from '../lib/supabase.js';
-import type { CreateLeadStatusRequest, UpdateLeadStatusRequest } from '@shared/types/api.js';
+import type { CreateLeadStatusRequest, UpdateLeadStatusRequest } from '@outreach/shared/types/api.js';
 
 const createStatusSchema = z.object({
   name: z.string().min(1),

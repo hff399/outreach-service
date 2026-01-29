@@ -1,6 +1,6 @@
 import type { WebSocket } from 'ws';
 import { createLogger } from '../lib/logger.js';
-import type { WsMessage, WsEventType, WsClientMessage } from '@shared/types/websocket.js';
+import type { WsMessage, WsEventType, WsClientMessage } from '@outreach/shared/types/websocket.js';
 
 const logger = createLogger('WebSocketHub');
 
@@ -211,6 +211,19 @@ export class WebSocketHub {
 
   emitCampaignProgress(campaignId: string, progress: unknown): void {
     this.broadcastToChannel(this.getCampaignChannel(campaignId), 'campaign:message_sent', progress);
+    // Also broadcast globally for dashboard
+    this.broadcast('campaign:progress', { campaign_id: campaignId, ...progress as object });
+  }
+
+  emitCampaignStatus(campaignId: string, status: string, message?: string): void {
+    const payload = {
+      campaign_id: campaignId,
+      status,
+      message,
+      timestamp: new Date().toISOString(),
+    };
+    this.broadcastToChannel(this.getCampaignChannel(campaignId), 'campaign:status', payload);
+    this.broadcast('campaign:status', payload);
   }
 
   private pingClients(): void {

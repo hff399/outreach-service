@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { generateId } from '@/lib/utils';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Plus, X, MessageSquare, Video, Mic, Image, FileText } from 'lucide-react';
+import { Loader2, Plus, X, MessageSquare, Video, Mic, Image, FileText, Tag, UserCheck } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -25,19 +25,27 @@ import {
 } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
-import { sequencesApi, accountsApi } from '@/lib/api';
+import { sequencesApi, accountsApi, statusesApi } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 
 type MessageType = 'text' | 'video' | 'video_note' | 'voice' | 'photo' | 'document';
 type TriggerType = 'any' | 'new_message' | 'keyword' | 'regex' | 'no_reply' | 'no_response';
+type StepType = 'message' | 'status_change' | 'tag';
 
 type Step = {
   id: string;
-  type: 'message';
+  type: StepType;
   delay_minutes: number;
+  // Message fields
   message_type?: MessageType;
   content?: string;
+  // Status change fields
+  status_id?: string;
+  // Tag fields
+  tags_to_add?: string[];
 };
+
+type Status = { id: string; name: string; color: string };
 
 type Sequence = {
   id: string;
@@ -50,7 +58,15 @@ type Sequence = {
     regex_pattern?: string;
     timeout_minutes?: number;
   };
-  steps: Step[];
+  steps: Array<{
+    id: string;
+    type?: string;
+    delay_minutes?: number;
+    message_type?: MessageType;
+    content?: string;
+    status_id?: string;
+    tags_to_add?: string[];
+  }>;
   assigned_accounts: string[];
 };
 
@@ -92,7 +108,13 @@ export function EditSequenceDialog({ sequence, open, onOpenChange }: EditSequenc
     staleTime: 5000,
   });
 
+  const { data: statuses } = useQuery({
+    queryKey: ['statuses'],
+    queryFn: () => statusesApi.list() as Promise<Status[]>,
+  });
+
   const availableAccounts = accounts || [];
+  const availableStatuses = statuses || [];
 
   // Load sequence data when dialog opens
   useEffect(() => {
@@ -105,10 +127,12 @@ export function EditSequenceDialog({ sequence, open, onOpenChange }: EditSequenc
       setTimeoutMinutes(sequence.trigger.timeout_minutes || 60);
       setSteps(sequence.steps.map(s => ({
         id: s.id || generateId(),
-        type: 'message' as const,
+        type: (s.type || 'message') as StepType,
         delay_minutes: s.delay_minutes || 0,
         message_type: s.message_type || 'text',
         content: s.content || '',
+        status_id: s.status_id,
+        tags_to_add: s.tags_to_add,
       })));
       setSelectedAccounts(sequence.assigned_accounts || []);
     }
@@ -144,8 +168,16 @@ export function EditSequenceDialog({ sequence, open, onOpenChange }: EditSequenc
           order: index,
           type: step.type,
           delay_minutes: step.delay_minutes,
-          message_type: step.message_type,
-          content: step.content,
+          ...(step.type === 'message' && {
+            message_type: step.message_type,
+            content: step.content,
+          }),
+          ...(step.type === 'status_change' && {
+            status_id: step.status_id,
+          }),
+          ...(step.type === 'tag' && {
+            tags_to_add: step.tags_to_add,
+          }),
         })),
         assigned_accounts: selectedAccounts,
       });
@@ -166,14 +198,20 @@ export function EditSequenceDialog({ sequence, open, onOpenChange }: EditSequenc
     );
   };
 
-  const addStep = () => {
-    setSteps([...steps, {
+  const addStep = (stepType: StepType = 'message') => {
+    const baseStep = {
       id: generateId(),
-      type: 'message',
-      delay_minutes: 1,
-      message_type: 'text',
-      content: '',
-    }]);
+      type: stepType,
+      delay_minutes: 0,
+    };
+
+    if (stepType === 'message') {
+      setSteps([...steps, { ...baseStep, message_type: 'text' as MessageType, content: '' }]);
+    } else if (stepType === 'status_change') {
+      setSteps([...steps, { ...baseStep, status_id: availableStatuses[0]?.id }]);
+    } else if (stepType === 'tag') {
+      setSteps([...steps, { ...baseStep, tags_to_add: [] }]);
+    }
   };
 
   const updateStep = (id: string, updates: Partial<Step>) => {
@@ -302,9 +340,17 @@ export function EditSequenceDialog({ sequence, open, onOpenChange }: EditSequenc
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <Label className="text-base font-semibold">Steps</Label>
-              <Button type="button" variant="outline" size="sm" onClick={addStep}>
-                <Plus className="h-4 w-4 mr-1" /> Add Step
-              </Button>
+              <div className="flex gap-2">
+                <Button type="button" variant="outline" size="sm" onClick={() => addStep('message')}>
+                  <MessageSquare className="h-4 w-4 mr-1" /> Message
+                </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => addStep('status_change')}>
+                  <UserCheck className="h-4 w-4 mr-1" /> Status
+                </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => addStep('tag')}>
+                  <Tag className="h-4 w-4 mr-1" /> Tag
+                </Button>
+              </div>
             </div>
 
             <div className="space-y-3">
@@ -312,7 +358,12 @@ export function EditSequenceDialog({ sequence, open, onOpenChange }: EditSequenc
                 <Card key={step.id}>
                   <CardContent className="p-4 space-y-3">
                     <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium">Step {index + 1}</span>
+                      <span className="text-sm font-medium flex items-center gap-2">
+                        {step.type === 'message' && <MessageSquare className="h-4 w-4" />}
+                        {step.type === 'status_change' && <UserCheck className="h-4 w-4" />}
+                        {step.type === 'tag' && <Tag className="h-4 w-4" />}
+                        Step {index + 1}: {step.type === 'message' ? 'Message' : step.type === 'status_change' ? 'Change Status' : 'Add Tag'}
+                      </span>
                       {steps.length > 1 && (
                         <Button
                           type="button"
@@ -325,76 +376,141 @@ export function EditSequenceDialog({ sequence, open, onOpenChange }: EditSequenc
                       )}
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1">
-                        <Label className="text-xs">Message Type</Label>
-                        <Select
-                          value={step.message_type}
-                          onValueChange={v => updateStep(step.id, { message_type: v as MessageType })}
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="text">
-                              <span className="flex items-center gap-2">
-                                {messageTypeIcons.text} Text
-                              </span>
-                            </SelectItem>
-                            <SelectItem value="photo">
-                              <span className="flex items-center gap-2">
-                                {messageTypeIcons.photo} Photo
-                              </span>
-                            </SelectItem>
-                            <SelectItem value="video">
-                              <span className="flex items-center gap-2">
-                                {messageTypeIcons.video} Video
-                              </span>
-                            </SelectItem>
-                            <SelectItem value="voice">
-                              <span className="flex items-center gap-2">
-                                {messageTypeIcons.voice} Voice
-                              </span>
-                            </SelectItem>
-                            <SelectItem value="video_note">
-                              <span className="flex items-center gap-2">
-                                {messageTypeIcons.video_note} Video Circle
-                              </span>
-                            </SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
+                    {/* Message Step */}
+                    {step.type === 'message' && (
+                      <>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-1">
+                            <Label className="text-xs">Message Type</Label>
+                            <Select
+                              value={step.message_type}
+                              onValueChange={v => updateStep(step.id, { message_type: v as MessageType })}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="text">
+                                  <span className="flex items-center gap-2">
+                                    {messageTypeIcons.text} Text
+                                  </span>
+                                </SelectItem>
+                                <SelectItem value="photo">
+                                  <span className="flex items-center gap-2">
+                                    {messageTypeIcons.photo} Photo
+                                  </span>
+                                </SelectItem>
+                                <SelectItem value="video">
+                                  <span className="flex items-center gap-2">
+                                    {messageTypeIcons.video} Video
+                                  </span>
+                                </SelectItem>
+                                <SelectItem value="voice">
+                                  <span className="flex items-center gap-2">
+                                    {messageTypeIcons.voice} Voice
+                                  </span>
+                                </SelectItem>
+                                <SelectItem value="video_note">
+                                  <span className="flex items-center gap-2">
+                                    {messageTypeIcons.video_note} Video Circle
+                                  </span>
+                                </SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
 
-                      <div className="space-y-1">
-                        <Label className="text-xs">Delay (minutes)</Label>
-                        <Input
-                          type="number"
-                          min="0"
-                          value={step.delay_minutes}
-                          onChange={e => updateStep(step.id, { delay_minutes: parseInt(e.target.value) || 0 })}
-                        />
-                      </div>
-                    </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">Delay (minutes)</Label>
+                            <Input
+                              type="number"
+                              min="0"
+                              value={step.delay_minutes}
+                              onChange={e => updateStep(step.id, { delay_minutes: parseInt(e.target.value) || 0 })}
+                            />
+                          </div>
+                        </div>
 
-                    <div className="space-y-1">
-                      <Label className="text-xs">
-                        {step.message_type === 'text' ? 'Message Content' : 'Media URL'}
-                      </Label>
-                      {step.message_type === 'text' ? (
-                        <Textarea
-                          value={step.content}
-                          onChange={e => updateStep(step.id, { content: e.target.value })}
-                          placeholder="Type your message..."
-                          className="min-h-[80px]"
-                        />
-                      ) : (
-                        <Input
-                          value={step.content}
-                          onChange={e => updateStep(step.id, { content: e.target.value })}
-                          placeholder="/uploads/media/file.mp4"
-                        />
-                      )}
-                    </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs">
+                            {step.message_type === 'text' ? 'Message Content' : 'Media URL'}
+                          </Label>
+                          {step.message_type === 'text' ? (
+                            <Textarea
+                              value={step.content}
+                              onChange={e => updateStep(step.id, { content: e.target.value })}
+                              placeholder="Type your message..."
+                              className="min-h-[80px]"
+                            />
+                          ) : (
+                            <Input
+                              value={step.content}
+                              onChange={e => updateStep(step.id, { content: e.target.value })}
+                              placeholder="/uploads/media/file.mp4"
+                            />
+                          )}
+                        </div>
+                      </>
+                    )}
+
+                    {/* Status Change Step */}
+                    {step.type === 'status_change' && (
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <Label className="text-xs">Change Status To</Label>
+                          <Select
+                            value={step.status_id}
+                            onValueChange={v => updateStep(step.id, { status_id: v })}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select status" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {availableStatuses.map(status => (
+                                <SelectItem key={status.id} value={status.id}>
+                                  {status.name}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label className="text-xs">Delay (minutes)</Label>
+                          <Input
+                            type="number"
+                            min="0"
+                            value={step.delay_minutes}
+                            onChange={e => updateStep(step.id, { delay_minutes: parseInt(e.target.value) || 0 })}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Tag Step */}
+                    {step.type === 'tag' && (
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <Label className="text-xs">Tags to Add (comma-separated)</Label>
+                          <Input
+                            value={step.tags_to_add?.join(', ') || ''}
+                            onChange={e => updateStep(step.id, {
+                              tags_to_add: e.target.value.split(',').map(t => t.trim()).filter(Boolean)
+                            })}
+                            placeholder="vip, interested"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label className="text-xs">Delay (minutes)</Label>
+                          <Input
+                            type="number"
+                            min="0"
+                            value={step.delay_minutes}
+                            onChange={e => updateStep(step.id, { delay_minutes: parseInt(e.target.value) || 0 })}
+                          />
+                        </div>
+                      </div>
+                    )}
                   </CardContent>
                 </Card>
               ))}

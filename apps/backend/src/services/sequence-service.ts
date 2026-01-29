@@ -2,7 +2,7 @@ import { supabase } from '../lib/supabase.js';
 import { createLogger } from '../lib/logger.js';
 import { TgAccountManager } from './tg-account-manager.js';
 import { WebSocketHub } from './websocket-hub.js';
-import type { Sequence, SequenceStep, Lead, Message } from '@shared/types/entities.js';
+import type { Sequence, SequenceStep, Lead, Message } from '@outreach/shared/types/entities.js';
 
 const logger = createLogger('SequenceService');
 

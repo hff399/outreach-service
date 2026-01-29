@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { supabase } from '../lib/supabase.js';
-import type { ImportGroupsRequest, UpdateGroupRequest } from '@shared/types/api.js';
+import type { ImportGroupsRequest, UpdateGroupRequest } from '@outreach/shared/types/api.js';
 
 const importGroupsSchema = z.object({
   groups: z.array(z.object({

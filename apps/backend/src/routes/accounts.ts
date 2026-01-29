@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { supabase } from '../lib/supabase.js';
 import { tgManager } from '../index.js';
-import type { CreateAccountRequest, UpdateAccountRequest } from '@shared/types/api.js';
+import type { CreateAccountRequest, UpdateAccountRequest } from '@outreach/shared/types/api.js';
 
 const createAccountSchema = z.object({
   phone: z.string().min(10),
@@ -237,6 +237,94 @@ export async function accountsRoutes(fastify: FastifyInstance) {
     const health = await tgManager.getHealthStatus();
     return { success: true, data: { accounts: health } };
   });
+
+  // Start QR code authentication
+  fastify.post('/:id/auth/qr/start', async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    const { id } = request.params;
+
+    const { data: account, error } = await supabase
+      .from('tg_accounts')
+      .select('phone, proxy_config')
+      .eq('id', id)
+      .single();
+
+    if (error || !account) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Account not found' } });
+    }
+
+    try {
+      const result = await tgManager.startQrAuth(id, account.proxy_config);
+      return { success: true, data: result };
+    } catch (err) {
+      return reply.status(500).send({
+        success: false,
+        error: { code: 'AUTH_ERROR', message: (err as Error).message },
+      });
+    }
+  });
+
+  // Poll QR code authentication status
+  fastify.post('/:id/auth/qr/poll', async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    const { id } = request.params;
+
+    try {
+      const result = await tgManager.pollQrAuth(id);
+      return { success: true, data: result };
+    } catch (err) {
+      const message = (err as Error).message;
+
+      if (message === 'QR_EXPIRED') {
+        return reply.status(400).send({
+          success: false,
+          error: { code: 'QR_EXPIRED', message: 'QR code expired, please generate a new one' },
+        });
+      }
+
+      if (message === '2FA_REQUIRED') {
+        return reply.status(400).send({
+          success: false,
+          error: { code: '2FA_REQUIRED', message: 'Two-factor authentication required' },
+        });
+      }
+
+      return reply.status(500).send({
+        success: false,
+        error: { code: 'AUTH_ERROR', message },
+      });
+    }
+  });
+
+  // Complete QR auth with 2FA password
+  fastify.post(
+    '/:id/auth/qr/2fa',
+    async (
+      request: FastifyRequest<{
+        Params: { id: string };
+        Body: { password: string };
+      }>,
+      reply: FastifyReply
+    ) => {
+      const { id } = request.params;
+      const { password } = request.body;
+
+      if (!password) {
+        return reply.status(400).send({
+          success: false,
+          error: { code: 'VALIDATION_ERROR', message: 'Password required' },
+        });
+      }
+
+      try {
+        await tgManager.completeQrAuth2FA(id, password);
+        return { success: true, data: { authenticated: true } };
+      } catch (err) {
+        return reply.status(500).send({
+          success: false,
+          error: { code: 'AUTH_ERROR', message: (err as Error).message },
+        });
+      }
+    }
+  );
 
   // Reconnect account
   fastify.post('/:id/reconnect', async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {

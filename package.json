@@ -8,21 +8,28 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run dev --workspaces --if-present",
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
     "dev:backend": "npm run dev --workspace=apps/backend",
     "dev:frontend": "npm run dev --workspace=apps/frontend",
-    "build": "npm run build --workspaces --if-present",
-    "build:backend": "npm run build --workspace=apps/backend",
+    "build": "npm run build --workspace=packages/shared && npm run build --workspace=apps/frontend",
     "build:frontend": "npm run build --workspace=apps/frontend",
-    "start": "npm run start --workspaces --if-present",
-    "start:backend": "npm run start --workspace=apps/backend",
-    "start:frontend": "npm run start --workspace=apps/frontend",
+    "start": "tsx apps/backend/src/index.ts",
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "db:generate-types": "supabase gen types typescript --project-id $SUPABASE_PROJECT_ID > packages/shared/src/types/supabase.ts",
-    "db:migrate": "supabase db push"
+    "db:migrate": "supabase db push",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:start:prod": "pm2 start ecosystem.config.cjs --env production",
+    "pm2:stop": "pm2 stop outreach",
+    "pm2:restart": "pm2 restart outreach",
+    "pm2:delete": "pm2 delete outreach",
+    "pm2:logs": "pm2 logs outreach",
+    "pm2:status": "pm2 status"
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
   }
 }

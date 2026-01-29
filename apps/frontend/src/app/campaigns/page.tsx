@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Play, Pause, Trash2, Settings, BarChart, RefreshCw } from 'lucide-react';
+import { Plus, Play, Pause, Trash2, Settings, BarChart, RefreshCw, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -82,6 +82,17 @@ export default function CampaignsPage() {
       queryClient.invalidateQueries({ queryKey: ['campaigns'] });
       setDeleteCampaign(null);
       toast({ title: 'Campaign deleted' });
+    },
+  });
+
+  const restartMutation = useMutation({
+    mutationFn: (id: string) => campaignsApi.restart(id),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['campaigns'] });
+      toast({ title: 'Campaign reset', description: data.message || 'All groups reset to pending' });
+    },
+    onError: (error: Error) => {
+      toast({ title: 'Failed to restart', description: error.message, variant: 'destructive' });
     },
   });
 
@@ -185,7 +196,17 @@ export default function CampaignsPage() {
                         <Pause className="mr-2 h-4 w-4" />
                         Pause
                       </Button>
-                    ) : campaign.status !== 'completed' ? (
+                    ) : campaign.status === 'completed' ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => restartMutation.mutate(campaign.id)}
+                        disabled={restartMutation.isPending}
+                      >
+                        <RotateCcw className="mr-2 h-4 w-4" />
+                        Restart
+                      </Button>
+                    ) : (
                       <Button
                         size="sm"
                         onClick={() => startMutation.mutate(campaign.id)}
@@ -194,7 +215,7 @@ export default function CampaignsPage() {
                         <Play className="mr-2 h-4 w-4" />
                         Start
                       </Button>
-                    ) : null}
+                    )}
                     <Button size="sm" variant="ghost" onClick={() => setEditCampaign(campaign)}>
                       <Settings className="h-4 w-4" />
                     </Button>

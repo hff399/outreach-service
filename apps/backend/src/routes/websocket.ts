@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { WebSocket } from 'ws';
 import { wsHub } from '../index.js';
 import { createLogger } from '../lib/logger.js';
-import type { WsClientMessage } from '@shared/types/websocket.js';
+import type { WsClientMessage } from '@outreach/shared/types/websocket.js';
 
 const logger = createLogger('WebSocket');
 

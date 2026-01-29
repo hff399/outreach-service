@@ -11,7 +11,7 @@ import { supabase } from '../lib/supabase.js';
 import { createLogger } from '../lib/logger.js';
 import { wsHub } from './websocket-hub.js';
 import { checkAndEnrollSequences } from './sequence-trigger.js';
-import type { TgAccount, TgAccountStatus, Lead } from '@shared/types/entities.js';
+import type { TgAccount, TgAccountStatus, Lead } from '@outreach/shared/types/entities.js';
 
 const logger = createLogger('TgAccountManager');
 
@@ -318,6 +318,171 @@ export class TgAccountManager {
     if (message.document) return 'document';
     if (message.sticker) return 'sticker';
     return 'text';
+  }
+
+  // QR Auth state management
+  private qrAuthState: Map<string, {
+    client: TelegramClient;
+    qrUrl?: string;
+    expiresAt?: number;
+    status: 'pending' | 'waiting' | 'success' | '2fa_required';
+    passwordResolver?: (password: string) => void;
+  }> = new Map();
+
+  async startQrAuth(accountId: string, proxyConfig: unknown): Promise<{ qrUrl: string; expiresAt: number }> {
+    logger.info(`Starting QR auth for account ${accountId}`);
+
+    // Clean up existing auth
+    const existing = this.qrAuthState.get(accountId);
+    if (existing?.client) {
+      try { await existing.client.disconnect(); } catch { /* ignore */ }
+    }
+    this.qrAuthState.delete(accountId);
+
+    const session = new StringSession('');
+    const proxy = proxyConfig as ProxyConfig | null;
+
+    const clientOptions: ConstructorParameters<typeof TelegramClient>[3] = {
+      connectionRetries: 5,
+      retryDelay: 1000,
+      autoReconnect: true,
+      deviceModel: 'Desktop',
+      appVersion: '4.8.1',
+      systemVersion: 'Windows 10',
+      langCode: 'en',
+    };
+
+    if (proxy && proxy.host && proxy.type !== 'mtproto') {
+      (clientOptions as Record<string, unknown>).agent = buildProxyAgent(proxy);
+    }
+
+    const client = new TelegramClient(
+      session,
+      appConfig.telegram.apiId,
+      appConfig.telegram.apiHash,
+      clientOptions
+    );
+
+    const state: typeof this.qrAuthState extends Map<string, infer V> ? V : never = {
+      client,
+      status: 'pending',
+    };
+    this.qrAuthState.set(accountId, state);
+
+    // Connect first, then start QR sign-in
+    logger.info('Connecting to Telegram...');
+    await client.connect();
+    logger.info('Connected, starting QR sign-in flow...');
+
+    client.signInUserWithQrCode(
+      { apiId: appConfig.telegram.apiId, apiHash: appConfig.telegram.apiHash },
+      {
+        qrCode: async (qrCode) => {
+          const tokenBase64 = qrCode.token.toString('base64url');
+          state.qrUrl = `tg://login?token=${tokenBase64}`;
+          state.expiresAt = qrCode.expires;
+          state.status = 'waiting';
+          logger.info(`QR code updated, expires: ${new Date(qrCode.expires * 1000).toISOString()}`);
+        },
+        password: async (hint) => {
+          logger.info('2FA required, hint:', hint || 'none');
+          state.status = '2fa_required';
+
+          // Wait for password from API
+          return new Promise<string>((resolve) => {
+            state.passwordResolver = resolve;
+          });
+        },
+        onError: async (error) => {
+          logger.error('QR auth error:', error.message);
+          return true; // Stop on error
+        },
+      }
+    ).then(async (user) => {
+      logger.info(`QR auth success! User: ${(user as Api.User).username || (user as Api.User).firstName}`);
+      state.status = 'success';
+
+      // Save session
+      const sessionString = (client.session as StringSession).save();
+      await supabase
+        .from('tg_accounts')
+        .update({
+          session_string: sessionString,
+          status: 'active',
+          username: (user as Api.User).username || null,
+          first_name: (user as Api.User).firstName || null,
+          last_name: (user as Api.User).lastName || null,
+          last_active_at: new Date().toISOString(),
+        })
+        .eq('id', accountId);
+
+      // Move to connected clients
+      this.clients.set(accountId, {
+        client,
+        account: { id: accountId, phone: '', status: 'active' } as TgAccount,
+        isConnected: true,
+      });
+      this.setupMessageHandler(accountId, client);
+      await this.setOnlineStatus(accountId, true);
+      this.startOnlineHeartbeat();
+
+      this.qrAuthState.delete(accountId);
+    }).catch((error) => {
+      logger.error('QR auth failed:', error.message);
+      this.qrAuthState.delete(accountId);
+    });
+
+    // Wait for first QR code
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 200));
+      if (state.qrUrl) break;
+    }
+
+    if (!state.qrUrl) {
+      throw new Error('Failed to generate QR code - timeout');
+    }
+
+    return { qrUrl: state.qrUrl, expiresAt: state.expiresAt || 0 };
+  }
+
+  async pollQrAuth(accountId: string): Promise<{ status: 'waiting' | 'success' | '2fa_required'; qrUrl?: string; expiresAt?: number }> {
+    // Check if already authenticated
+    if (this.clients.get(accountId)?.isConnected) {
+      return { status: 'success' };
+    }
+
+    const state = this.qrAuthState.get(accountId);
+    if (!state) {
+      throw new Error('QR_EXPIRED');
+    }
+
+    return {
+      status: state.status === 'pending' ? 'waiting' : state.status as 'waiting' | 'success' | '2fa_required',
+      qrUrl: state.qrUrl,
+      expiresAt: state.expiresAt,
+    };
+  }
+
+  async completeQrAuth2FA(accountId: string, password: string): Promise<boolean> {
+    const state = this.qrAuthState.get(accountId);
+    if (!state || !state.passwordResolver) {
+      throw new Error('No pending 2FA request');
+    }
+
+    state.passwordResolver(password);
+
+    // Wait for completion
+    for (let i = 0; i < 50; i++) {
+      await new Promise(r => setTimeout(r, 200));
+      if (this.clients.get(accountId)?.isConnected) {
+        return true;
+      }
+      if (!this.qrAuthState.has(accountId)) {
+        throw new Error('Authentication failed');
+      }
+    }
+
+    throw new Error('Authentication timeout');
   }
 
   async startAuth(accountId: string, phone: string): Promise<{ phoneCodeHash: string }> {

@@ -2,8 +2,8 @@ import { supabase } from '../lib/supabase.js';
 import { createLogger } from '../lib/logger.js';
 import { TgAccountManager } from './tg-account-manager.js';
 import { WebSocketHub } from './websocket-hub.js';
-import { applyTemplate } from '@shared/utils/index.js';
-import type { Campaign, TgGroup, MessageTemplate } from '@shared/types/entities.js';
+import { applyTemplate } from '@outreach/shared/utils/index.js';
+import type { Campaign, TgGroup, MessageTemplate } from '@outreach/shared/types/entities.js';
 
 const logger = createLogger('CampaignService');
 
@@ -14,6 +14,16 @@ type ScheduleConfig = {
   account_rotation?: 'round_robin' | 'random' | 'least_used';
 };
 
+export type CampaignStartResult = {
+  success: boolean;
+  error?: string;
+  details?: {
+    totalGroups: number;
+    connectedAccounts: number;
+    hasMessage: boolean;
+  };
+};
+
 export class CampaignService {
   private accountUsageCount: Map<string, number> = new Map();
   private runningCampaigns: Set<string> = new Set();
@@ -22,6 +32,60 @@ export class CampaignService {
     private tgManager: TgAccountManager,
     private wsHub: WebSocketHub
   ) {}
+
+  /**
+   * Check if campaign can be started and return detailed info
+   */
+  async validateCampaign(campaignId: string): Promise<CampaignStartResult> {
+    // Fetch campaign with template
+    const { data: campaign, error } = await supabase
+      .from('campaigns')
+      .select('*, message_templates(*)')
+      .eq('id', campaignId)
+      .single();
+
+    if (error || !campaign) {
+      return { success: false, error: 'Campaign not found' };
+    }
+
+    // Check for pending groups
+    const { count: pendingGroupCount } = await supabase
+      .from('campaign_groups')
+      .select('*', { count: 'exact', head: true })
+      .eq('campaign_id', campaignId)
+      .eq('status', 'pending');
+
+    const totalGroups = pendingGroupCount || 0;
+
+    // Check for connected accounts
+    const connectedAccounts = this.tgManager.getConnectedAccounts()
+      .filter((id) => campaign.assigned_accounts?.includes(id));
+
+    // Check for message content
+    const template = campaign.message_templates as MessageTemplate | null;
+    const messageText = template?.content || campaign.custom_message || '';
+    const hasMessage = !!messageText;
+
+    const details = {
+      totalGroups,
+      connectedAccounts: connectedAccounts.length,
+      hasMessage,
+    };
+
+    if (totalGroups === 0) {
+      return { success: false, error: 'No groups added to campaign', details };
+    }
+
+    if (connectedAccounts.length === 0) {
+      return { success: false, error: 'No connected accounts assigned to campaign', details };
+    }
+
+    if (!hasMessage) {
+      return { success: false, error: 'No message template or custom message set', details };
+    }
+
+    return { success: true, details };
+  }
 
   /**
    * Execute campaign - sends 1 message per group with configurable delays
@@ -68,6 +132,8 @@ export class CampaignService {
 
       if (connectedAccounts.length === 0) {
         logger.error(`No connected accounts for campaign ${campaignId}`);
+        this.wsHub.emitCampaignStatus(campaignId, 'error', 'No connected accounts available');
+        await supabase.from('campaigns').update({ status: 'paused' }).eq('id', campaignId);
         return;
       }
 
@@ -88,6 +154,9 @@ export class CampaignService {
       const randomizeDelay = scheduleConfig.randomize_delay !== false;
 
       logger.info(`Starting campaign ${campaignId}: ${groups.length} groups, delay ${minDelayMs/1000}-${maxDelayMs/1000}s`);
+
+      // Emit campaign started event
+      this.wsHub.emitCampaignStatus(campaignId, 'running', `Sending to ${groups.length} groups`);
 
       for (let i = 0; i < groups.length; i++) {
         const group = groups[i];
@@ -122,7 +191,6 @@ export class CampaignService {
             .update({
               status: 'sent',
               sent_at: new Date().toISOString(),
-              account_id: accountId,
             })
             .eq('campaign_id', campaignId)
             .eq('group_id', group.id);
@@ -283,6 +351,7 @@ export class CampaignService {
       .eq('id', campaignId);
 
     logger.info(`Campaign ${campaignId} completed`);
+    this.wsHub.emitCampaignStatus(campaignId, 'completed', 'All messages sent');
   }
 
   async pauseCampaign(campaignId: string): Promise<void> {
@@ -297,6 +366,51 @@ export class CampaignService {
       .from('campaigns')
       .update({ status: 'active' })
       .eq('id', campaignId);
+  }
+
+  /**
+   * Restart campaign - reset all groups to pending status
+   */
+  async restartCampaign(campaignId: string): Promise<{ reset: number }> {
+    // Reset all campaign_groups to pending
+    const { data: updated } = await supabase
+      .from('campaign_groups')
+      .update({
+        status: 'pending',
+        sent_at: null,
+        error_message: null,
+      })
+      .eq('campaign_id', campaignId)
+      .select('group_id');
+
+    // Reset campaign stats
+    await supabase
+      .from('campaigns')
+      .update({
+        status: 'draft',
+        stats: {
+          total_groups: 0,
+          messages_sent: 0,
+          messages_failed: 0,
+          responses_received: 0,
+        },
+      })
+      .eq('id', campaignId);
+
+    // Clear account usage for this campaign
+    this.accountUsageCount.clear();
+
+    const resetCount = updated?.length || 0;
+    logger.info(`Campaign ${campaignId} restarted, reset ${resetCount} groups`);
+
+    return { reset: resetCount };
+  }
+
+  /**
+   * Check if campaign is currently running
+   */
+  isRunning(campaignId: string): boolean {
+    return this.runningCampaigns.has(campaignId);
   }
 
   private randomBetween(min: number, max: number): number {

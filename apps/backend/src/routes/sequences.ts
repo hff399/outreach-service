@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { supabase } from '../lib/supabase.js';
-import type { CreateSequenceRequest, UpdateSequenceRequest } from '@shared/types/api.js';
+import type { CreateSequenceRequest, UpdateSequenceRequest } from '@outreach/shared/types/api.js';
 
 const stepConditionSchema = z.object({
   type: z.enum(['no_reply', 'replied', 'keyword_match', 'status_is', 'has_tag']),
