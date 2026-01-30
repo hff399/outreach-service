@@ -1,5 +1,5 @@
-// In production, API is served from same origin. In dev, use proxy or localhost.
-const API_URL = '';
+// In production, API is served from same origin. In dev, use NEXT_PUBLIC_BACKEND_URL.
+const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || '';
 
 type RequestOptions = {
   method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
@@ -179,7 +179,7 @@ export const uploadsApi = {
       formData.append('video_note', 'true');
     }
 
-    const res = await fetch('/api/uploads/media', {
+    const res = await fetch(`${API_URL}/api/uploads/media`, {
       method: 'POST',
       body: formData,
     });

@@ -13,9 +13,16 @@ class WebSocketClient {
 
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      // Use same host as page, auto-detect protocol
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}`;
+      // In dev, use NEXT_PUBLIC_WS_URL. In production, use same host as page.
+      const wsUrlEnv = process.env.NEXT_PUBLIC_WS_URL;
+      let wsUrl: string;
+
+      if (wsUrlEnv) {
+        wsUrl = wsUrlEnv;
+      } else {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        wsUrl = `${protocol}//${window.location.host}`;
+      }
 
       this.ws = new WebSocket(`${wsUrl}/ws`);
 
