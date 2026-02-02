@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { supabase } from '../lib/supabase.js';
 import type { CreateSequenceRequest, UpdateSequenceRequest } from '@outreach/shared/types/api.js';
+import type { Lead, Sequence } from '@outreach/shared/types/entities.js';
+import { checkAndEnrollSequences, batchEnrollExistingLeads } from '../services/sequence-trigger.js';
 
 const stepConditionSchema = z.object({
   type: z.enum(['no_reply', 'replied', 'keyword_match', 'status_is', 'has_tag']),
@@ -262,6 +264,14 @@ export async function sequencesRoutes(fastify: FastifyInstance) {
       return reply.status(500).send({ success: false, error: { code: 'DB_ERROR', message: error.message } });
     }
 
+    // Batch enroll existing leads who have messaged but haven't been responded to
+    // Run in background to not block the response
+    batchEnrollExistingLeads(sequence as Sequence).then(result => {
+      console.log(`[SequenceActivate] Batch enrollment for ${sequence.name}: ${result.enrolled} enrolled, ${result.skipped} skipped`);
+    }).catch(err => {
+      console.error('[SequenceActivate] Batch enrollment failed:', err);
+    });
+
     return { success: true, data: sequence };
   });
 
@@ -280,5 +290,68 @@ export async function sequencesRoutes(fastify: FastifyInstance) {
     }
 
     return { success: true, data: enrollments };
+  });
+
+  // Debug endpoint: Test sequence enrollment for a lead
+  fastify.post('/debug/test-enrollment', async (request: FastifyRequest<{ Body: { leadId: string; accountId: string; messageText?: string } }>, reply: FastifyReply) => {
+    const { leadId, accountId, messageText = 'test message' } = request.body;
+
+    // Get the lead
+    const { data: lead, error: leadError } = await supabase
+      .from('leads')
+      .select('*')
+      .eq('id', leadId)
+      .single();
+
+    if (leadError || !lead) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Lead not found', details: leadError?.message } });
+    }
+
+    // Call checkAndEnrollSequences
+    try {
+      await checkAndEnrollSequences(lead as Lead, messageText, accountId);
+      return { success: true, message: 'Check completed - see server logs for details' };
+    } catch (error) {
+      return reply.status(500).send({ success: false, error: { code: 'ERROR', message: String(error) } });
+    }
+  });
+
+  // Debug endpoint: Check sequences for a specific account
+  fastify.get('/debug/account/:accountId', async (request: FastifyRequest<{ Params: { accountId: string } }>, reply: FastifyReply) => {
+    const { accountId } = request.params;
+
+    // Get all active sequences
+    const { data: allSequences, error: allSeqError } = await supabase
+      .from('sequences')
+      .select('id, name, status, assigned_accounts, trigger')
+      .eq('status', 'active');
+
+    // Get sequences with contains filter
+    const { data: matchingSequences, error: matchSeqError } = await supabase
+      .from('sequences')
+      .select('id, name, status, assigned_accounts, trigger')
+      .eq('status', 'active')
+      .contains('assigned_accounts', [accountId]);
+
+    // Get account info
+    const { data: account, error: accountError } = await supabase
+      .from('tg_accounts')
+      .select('id, phone, username, status')
+      .eq('id', accountId)
+      .single();
+
+    return {
+      success: true,
+      data: {
+        accountId,
+        account: account || null,
+        accountError: accountError?.message,
+        allActiveSequences: allSequences || [],
+        allActiveSequencesError: allSeqError?.message,
+        sequencesMatchingAccount: matchingSequences || [],
+        matchingSequencesError: matchSeqError?.message,
+        note: 'Check if assigned_accounts array contains the accountId'
+      }
+    };
   });
 }

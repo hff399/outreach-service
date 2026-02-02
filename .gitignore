@@ -56,3 +56,4 @@ apps/backend/sessions/*.json
 # Misc
 .vercel
 .turbo
+.omc/

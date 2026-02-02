@@ -2,6 +2,14 @@ import { supabase } from '../lib/supabase.js';
 import { createLogger } from '../lib/logger.js';
 import { executeSequenceStep } from './sequence-executor.js';
 import type { Lead, Sequence, SequenceEnrollment } from '@outreach/shared/types/entities.js';
+import type {
+  SequenceRow,
+  SequenceEnrollmentRow,
+  SequenceEnrollmentInsert,
+  SequenceEnrollmentUpdate,
+  LeadRow,
+  MessageRow
+} from '../lib/db-helpers.js';
 
 const logger = createLogger('SequenceScheduler');
 
@@ -46,7 +54,7 @@ async function checkSingleCondition(lead: Lead, condition: TriggerCondition): Pr
         .from('lead_tags')
         .select('tag')
         .eq('lead_id', lead.id);
-      fieldValue = tags?.map(t => t.tag) || [];
+      fieldValue = tags?.map(t => (t as { tag: string }).tag) || [];
       break;
     case 'has_messages':
       const { count } = await supabase
@@ -63,7 +71,7 @@ async function checkSingleCondition(lead: Lead, condition: TriggerCondition): Pr
         .order('sent_at', { ascending: false })
         .limit(1)
         .single();
-      fieldValue = lastMsg?.direction;
+      fieldValue = (lastMsg as Pick<MessageRow, 'direction'> | null)?.direction;
       break;
     case 'custom_field':
       fieldValue = lead.custom_fields?.[condition.custom_field_key || ''];
@@ -112,7 +120,8 @@ async function checkNoResponseTriggers(): Promise<void> {
   if (!sequences || sequences.length === 0) return;
 
   for (const sequence of sequences) {
-    const trigger = sequence.trigger as SequenceTrigger;
+    const typedSequence = sequence as SequenceRow;
+    const trigger = typedSequence.trigger as SequenceTrigger;
     const timeoutMinutes = trigger.timeout_minutes || 60;
     const cutoffTime = new Date(Date.now() - timeoutMinutes * 60 * 1000).toISOString();
 
@@ -125,8 +134,9 @@ async function checkNoResponseTriggers(): Promise<void> {
     // Group by lead and find those with incoming last message older than cutoff
     const lastMessageByLead = new Map<string, { direction: string; sent_at: string }>();
     for (const msg of messages || []) {
-      if (!lastMessageByLead.has(msg.lead_id)) {
-        lastMessageByLead.set(msg.lead_id, { direction: msg.direction, sent_at: msg.sent_at });
+      const typedMsg = msg as Pick<MessageRow, 'lead_id' | 'direction' | 'sent_at'>;
+      if (!lastMessageByLead.has(typedMsg.lead_id)) {
+        lastMessageByLead.set(typedMsg.lead_id, { direction: typedMsg.direction, sent_at: typedMsg.sent_at });
       }
     }
 
@@ -140,10 +150,10 @@ async function checkNoResponseTriggers(): Promise<void> {
     const { data: existingEnrollments } = await supabase
       .from('sequence_enrollments')
       .select('lead_id')
-      .eq('sequence_id', sequence.id)
+      .eq('sequence_id', typedSequence.id)
       .in('status', ['active', 'completed']);
 
-    const enrolledLeadIds = new Set(existingEnrollments?.map(e => e.lead_id) || []);
+    const enrolledLeadIds = new Set(existingEnrollments?.map(e => (e as Pick<SequenceEnrollmentRow, 'lead_id'>).lead_id) || []);
     const leadsToEnroll = leadsNeedingResponse.filter(id => !enrolledLeadIds.has(id));
 
     // Enroll leads
@@ -163,7 +173,7 @@ async function checkNoResponseTriggers(): Promise<void> {
       }
 
       // Enroll in sequence
-      await enrollLeadInSequence(lead as Lead, sequence as Sequence);
+      await enrollLeadInSequence(lead as Lead, typedSequence as Sequence);
     }
   }
 }
@@ -179,7 +189,8 @@ async function checkNoReplyTriggers(): Promise<void> {
   if (!sequences || sequences.length === 0) return;
 
   for (const sequence of sequences) {
-    const trigger = sequence.trigger as SequenceTrigger;
+    const typedSequence = sequence as SequenceRow;
+    const trigger = typedSequence.trigger as SequenceTrigger;
     const timeoutMinutes = trigger.timeout_minutes || 60;
     const cutoffTime = new Date(Date.now() - timeoutMinutes * 60 * 1000).toISOString();
 
@@ -191,8 +202,9 @@ async function checkNoReplyTriggers(): Promise<void> {
 
     const lastMessageByLead = new Map<string, { direction: string; sent_at: string }>();
     for (const msg of messages || []) {
-      if (!lastMessageByLead.has(msg.lead_id)) {
-        lastMessageByLead.set(msg.lead_id, { direction: msg.direction, sent_at: msg.sent_at });
+      const typedMsg = msg as Pick<MessageRow, 'lead_id' | 'direction' | 'sent_at'>;
+      if (!lastMessageByLead.has(typedMsg.lead_id)) {
+        lastMessageByLead.set(typedMsg.lead_id, { direction: typedMsg.direction, sent_at: typedMsg.sent_at });
       }
     }
 
@@ -206,10 +218,10 @@ async function checkNoReplyTriggers(): Promise<void> {
     const { data: existingEnrollments } = await supabase
       .from('sequence_enrollments')
       .select('lead_id')
-      .eq('sequence_id', sequence.id)
+      .eq('sequence_id', typedSequence.id)
       .in('status', ['active', 'completed']);
 
-    const enrolledLeadIds = new Set(existingEnrollments?.map(e => e.lead_id) || []);
+    const enrolledLeadIds = new Set(existingEnrollments?.map(e => (e as Pick<SequenceEnrollmentRow, 'lead_id'>).lead_id) || []);
     const leadsToEnroll = leadsNotReplied.filter(id => !enrolledLeadIds.has(id));
 
     for (const leadId of leadsToEnroll) {
@@ -226,40 +238,72 @@ async function checkNoReplyTriggers(): Promise<void> {
         if (!matches) continue;
       }
 
-      await enrollLeadInSequence(lead as Lead, sequence as Sequence);
+      await enrollLeadInSequence(lead as Lead, typedSequence as Sequence);
     }
   }
 }
 
 // Enroll a lead in a sequence
 async function enrollLeadInSequence(lead: Lead, sequence: Sequence): Promise<void> {
-  const steps = sequence.steps as Array<{ id: string; order: number }>;
+  const steps = sequence.steps as Array<{ id: string; order: number; delay_minutes?: number }>;
   const firstStep = steps.find(s => s.order === 0) || steps[0];
 
-  const { data: enrollment, error } = await supabase
+  const delayMinutes = firstStep.delay_minutes || 0;
+  // If executing immediately, set next_step_at to null to prevent double execution
+  const nextStepAt = delayMinutes > 0
+    ? new Date(Date.now() + delayMinutes * 60 * 1000).toISOString()
+    : null;
+
+  // Build enrollment data dynamically to handle missing columns
+  const enrollmentData: Record<string, unknown> = {
+    sequence_id: sequence.id,
+    lead_id: lead.id,
+    current_step: 0,
+    status: 'active',
+    next_step_at: nextStepAt,
+  };
+
+  // Add account_id if available
+  if (lead.assigned_account_id) {
+    enrollmentData.account_id = lead.assigned_account_id;
+  }
+
+  let { data: enrollment, error } = await supabase
     .from('sequence_enrollments')
-    .insert({
-      sequence_id: sequence.id,
-      lead_id: lead.id,
-      account_id: lead.assigned_account_id,
-      current_step_id: firstStep?.id,
-      status: 'active',
-      started_at: new Date().toISOString(),
-    })
+    .insert(enrollmentData as SequenceEnrollmentInsert)
     .select()
     .single();
 
   if (error) {
-    logger.error(`Failed to enroll lead ${lead.id} in sequence ${sequence.id}`, error);
-    return;
+    // Check if error is due to missing column and retry without account_id
+    if (error.message?.includes('account_id')) {
+      logger.warn('account_id column not found in sequence_enrollments. Run the database migration.');
+      delete enrollmentData.account_id;
+      const retryResult = await supabase
+        .from('sequence_enrollments')
+        .insert(enrollmentData as SequenceEnrollmentInsert)
+        .select()
+        .single();
+
+      if (retryResult.error) {
+        logger.error(`Failed to enroll lead ${lead.id} in sequence ${sequence.id}`, retryResult.error);
+        return;
+      }
+      enrollment = retryResult.data;
+    } else {
+      logger.error(`Failed to enroll lead ${lead.id} in sequence ${sequence.id}`, error);
+      return;
+    }
   }
 
   logger.info(`Enrolled lead ${lead.id} in sequence ${sequence.name}`);
 
-  // Schedule first step
-  const firstStepData = steps.find(s => s.id === firstStep?.id);
-  if (firstStepData && enrollment) {
-    scheduleStep(enrollment as SequenceEnrollment, firstStepData);
+  // Execute first step immediately if no delay
+  if (firstStep && enrollment && delayMinutes === 0) {
+    const typedEnrollment = enrollment as SequenceEnrollmentRow;
+    executeSequenceStep(typedEnrollment.id, firstStep.id).catch(err => {
+      logger.error(`Failed to execute first step`, err);
+    });
   }
 }
 
@@ -282,7 +326,7 @@ function scheduleStep(
       .from('sequence_enrollments')
       .update({
         next_step_at: executeAt,
-      })
+      } as SequenceEnrollmentUpdate)
       .eq('id', enrollment.id)
       .then(() => {
         logger.debug(`Scheduled step ${step.id} for ${executeAt}`);
@@ -304,9 +348,17 @@ async function processScheduledSteps(): Promise<void> {
   if (!dueEnrollments || dueEnrollments.length === 0) return;
 
   for (const enrollment of dueEnrollments) {
-    if (!enrollment.current_step_id) continue;
+    const typedEnrollment = enrollment as SequenceEnrollmentRow & {
+      sequences: Sequence;
+    };
+    const sequence = typedEnrollment.sequences;
+    const steps = sequence.steps as Array<{ id: string; order: number }>;
+    const currentStepIndex = typedEnrollment.current_step ?? 0;
+    const currentStep = steps[currentStepIndex];
 
-    await executeSequenceStep(enrollment.id, enrollment.current_step_id).catch(err => {
+    if (!currentStep) continue;
+
+    await executeSequenceStep(typedEnrollment.id, currentStep.id).catch(err => {
       logger.error(`Failed to execute scheduled step`, err);
     });
   }

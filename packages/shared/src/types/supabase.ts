@@ -375,6 +375,58 @@ export type Database = {
           error_message?: string | null
         }
       }
+      lead_tags: {
+        Row: {
+          id: string
+          lead_id: string
+          tag: string
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          lead_id: string
+          tag: string
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          lead_id?: string
+          tag?: string
+          created_at?: string
+        }
+      }
+      reminders: {
+        Row: {
+          id: string
+          lead_id: string
+          title: string
+          description: string | null
+          due_at: string
+          completed: boolean
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          lead_id: string
+          title: string
+          description?: string | null
+          due_at: string
+          completed?: boolean
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          lead_id?: string
+          title?: string
+          description?: string | null
+          due_at?: string
+          completed?: boolean
+          created_at?: string
+          updated_at?: string
+        }
+      }
       sequence_enrollments: {
         Row: {
           id: string
@@ -385,6 +437,9 @@ export type Database = {
           next_step_at: string | null
           started_at: string
           completed_at: string | null
+          account_id: string | null
+          waiting_for: string | null
+          wait_until: string | null
         }
         Insert: {
           id?: string
@@ -395,6 +450,9 @@ export type Database = {
           next_step_at?: string | null
           started_at?: string
           completed_at?: string | null
+          account_id?: string | null
+          waiting_for?: string | null
+          wait_until?: string | null
         }
         Update: {
           id?: string
@@ -405,6 +463,9 @@ export type Database = {
           next_step_at?: string | null
           started_at?: string
           completed_at?: string | null
+          account_id?: string | null
+          waiting_for?: string | null
+          wait_until?: string | null
         }
       }
     }

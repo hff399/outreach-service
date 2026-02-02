@@ -117,44 +117,97 @@ export function ImportGroupsDialog({ open, onOpenChange }: ImportGroupsDialogPro
     importMutation.mutate(groups);
   };
 
+  // Parse CSV line handling quoted values with commas inside
+  const parseCSVLine = (line: string, delimiter: string): string[] => {
+    const result: string[] = [];
+    let current = '';
+    let inQuotes = false;
+
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      const nextChar = line[i + 1];
+
+      if (char === '"') {
+        if (inQuotes && nextChar === '"') {
+          // Escaped quote
+          current += '"';
+          i++;
+        } else {
+          // Toggle quote mode
+          inQuotes = !inQuotes;
+        }
+      } else if (char === delimiter && !inQuotes) {
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  };
+
+  // Normalize header name for matching
+  const normalizeHeader = (h: string): string => {
+    return h.toLowerCase()
+      .replace(/^@/, '')           // Remove leading @
+      .replace(/[_\-\s]+/g, '')    // Remove separators
+      .replace(/^["']|["']$/g, ''); // Remove quotes
+  };
+
   const handleImportCSV = () => {
     try {
-      const lines = csvContent.trim().split('\n').filter(line => line.trim());
+      // Remove BOM if present and normalize line endings
+      let content = csvContent.trim();
+      if (content.charCodeAt(0) === 0xFEFF) {
+        content = content.slice(1);
+      }
+      content = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+      const lines = content.split('\n').filter(line => line.trim());
       if (lines.length < 1) {
         toast({ title: 'Error', description: 'CSV is empty', variant: 'destructive' });
         return;
       }
 
-      const headers = lines[0].toLowerCase().split(',').map((h) => h.trim());
+      // Auto-detect delimiter: comma or semicolon
+      const firstLine = lines[0];
+      const commaCount = (firstLine.match(/,/g) || []).length;
+      const semicolonCount = (firstLine.match(/;/g) || []).length;
+      const delimiter = semicolonCount > commaCount ? ';' : ',';
 
-      // Check if first line looks like headers or data
-      const hasHeaders = headers.some(h =>
-        ['username', 'handle', 'title', 'name', 'category', 'members'].includes(h)
-      );
+      const rawHeaders = parseCSVLine(lines[0], delimiter);
+      const headers = rawHeaders.map(normalizeHeader);
 
-      // Find column indexes - support multiple naming variations
-      const usernameIdx = Math.max(
-        headers.indexOf('username'),
-        headers.indexOf('handle'),
-        headers.indexOf('link')
-      );
-      const titleIdx = Math.max(
-        headers.indexOf('title'),
-        headers.indexOf('name'),
-        headers.indexOf('group')
-      );
-      const membersIdx = Math.max(
-        headers.indexOf('members'),
-        headers.indexOf('member_count'),
-        headers.indexOf('count')
-      );
-      const categoryIdx = headers.indexOf('category');
+      // Header variations mapping
+      const usernameVariants = ['username', 'handle', 'link', 'user', 'tgusername', 'telegramusername', 'юзернейм', 'ссылка'];
+      const titleVariants = ['title', 'name', 'group', 'groupname', 'название', 'имя', 'группа'];
+      const membersVariants = ['members', 'membercount', 'count', 'участники', 'количество'];
+      const categoryVariants = ['category', 'cat', 'type', 'категория', 'тип'];
+
+      // Check if first line looks like headers
+      const headerKeywords = [...usernameVariants, ...titleVariants, ...membersVariants, ...categoryVariants];
+      const hasHeaders = headers.some(h => headerKeywords.includes(h));
+
+      // Find column indexes with flexible matching
+      const findIndex = (variants: string[]): number => {
+        for (const variant of variants) {
+          const idx = headers.indexOf(variant);
+          if (idx !== -1) return idx;
+        }
+        return -1;
+      };
+
+      const usernameIdx = findIndex(usernameVariants);
+      const titleIdx = findIndex(titleVariants);
+      const membersIdx = findIndex(membersVariants);
+      const categoryIdx = findIndex(categoryVariants);
 
       // If no headers detected, assume format: title, username, category
       const dataLines = hasHeaders ? lines.slice(1) : lines;
 
       const groups: GroupInput[] = dataLines.map((line) => {
-        const values = line.split(',').map((v) => v.trim());
+        const values = parseCSVLine(line, delimiter);
 
         let username: string;
         let title: string;
@@ -163,24 +216,40 @@ export function ImportGroupsDialog({ open, onOpenChange }: ImportGroupsDialogPro
 
         if (hasHeaders && usernameIdx !== -1) {
           // Use header positions
-          username = values[usernameIdx]?.replace('@', '') || '';
-          title = titleIdx !== -1 ? values[titleIdx] : username;
+          username = (values[usernameIdx] || '').replace(/^@/, '').replace(/^https?:\/\/t\.me\//i, '');
+          title = titleIdx !== -1 ? (values[titleIdx] || username) : username;
           category = categoryIdx !== -1 ? values[categoryIdx] : undefined;
           memberCount = membersIdx !== -1 ? parseInt(values[membersIdx]) || undefined : undefined;
         } else {
-          // Auto-detect format: title, username, category (3 cols) or username only (1 col)
+          // Auto-detect format based on column count
           if (values.length >= 3) {
+            // Assume: title, username, category
             title = values[0];
-            username = values[1]?.replace('@', '') || '';
+            username = (values[1] || '').replace(/^@/, '').replace(/^https?:\/\/t\.me\//i, '');
             category = values[2];
           } else if (values.length === 2) {
-            title = values[0];
-            username = values[1]?.replace('@', '') || '';
+            // Could be: title, username OR username, title
+            // Heuristic: if first value starts with @ or looks like a username, treat it as username
+            const first = values[0] || '';
+            const second = values[1] || '';
+            if (first.startsWith('@') || first.match(/^[a-z0-9_]+$/i)) {
+              username = first.replace(/^@/, '').replace(/^https?:\/\/t\.me\//i, '');
+              title = second || username;
+            } else {
+              title = first;
+              username = second.replace(/^@/, '').replace(/^https?:\/\/t\.me\//i, '');
+            }
           } else {
-            username = values[0]?.replace('@', '') || '';
+            // Single column - treat as username
+            username = (values[0] || '').replace(/^@/, '').replace(/^https?:\/\/t\.me\//i, '');
             title = username;
           }
         }
+
+        // Clean up empty strings
+        username = username.trim();
+        title = (title || username).trim();
+        category = category?.trim() || undefined;
 
         return {
           tg_id: username,
@@ -189,14 +258,26 @@ export function ImportGroupsDialog({ open, onOpenChange }: ImportGroupsDialogPro
           member_count: memberCount,
           category: category || undefined,
         };
-      }).filter((g) => g.username);
+      }).filter((g) => g.username && g.username.length > 0);
 
       if (groups.length === 0) {
-        toast({ title: 'Error', description: 'No valid groups found in CSV', variant: 'destructive' });
+        toast({ title: 'Error', description: 'No valid groups found in CSV. Check format: username required.', variant: 'destructive' });
         return;
       }
 
-      importMutation.mutate(groups);
+      // Deduplicate by username (tg_id) - keep last occurrence (overwrites earlier)
+      const uniqueGroups = Array.from(
+        new Map(groups.map(g => [g.username.toLowerCase(), g])).values()
+      );
+
+      if (uniqueGroups.length < groups.length) {
+        toast({
+          title: 'Note',
+          description: `Removed ${groups.length - uniqueGroups.length} duplicate entries`,
+        });
+      }
+
+      importMutation.mutate(uniqueGroups);
     } catch (err) {
       toast({ title: 'Error', description: 'Failed to parse CSV: ' + (err as Error).message, variant: 'destructive' });
     }
@@ -315,15 +396,20 @@ marketingpros
             <div className="space-y-2">
               <Label>CSV Content</Label>
               <Textarea
-                placeholder="Group Title,@username,category
+                placeholder="title,username,category
 Wildberries | Селлеры,@wildberries_business,селлеры
-WB Ozon | Чат селлеров,@ozonhelpchat,селлеры"
+WB Ozon | Чат селлеров,@ozonhelpchat,селлеры
+
+Or just usernames:
+@wildberries_business
+@ozonhelpchat"
                 value={csvContent}
                 onChange={(e) => setCsvContent(e.target.value)}
                 className="min-h-[200px] font-mono text-sm"
               />
               <p className="text-xs text-muted-foreground">
-                Supports formats: title,username,category or username,title,members,category. Headers optional.
+                Supports: CSV with headers, without headers, semicolon delimiter (;), quoted values, t.me links.
+                Headers: username/handle/link, title/name/group, category, members.
               </p>
             </div>
             <Button

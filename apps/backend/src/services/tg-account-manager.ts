@@ -27,6 +27,8 @@ type TgClientEntry = {
   client: TelegramClient;
   account: TgAccount;
   isConnected: boolean;
+  connectedAt?: number; // Timestamp when account was connected
+  authKeyFailures?: number; // Count of consecutive AUTH_KEY_DUPLICATED failures
 };
 
 function buildProxyAgent(config: ProxyConfig) {
@@ -154,6 +156,55 @@ export class TgAccountManager {
         })
         .eq('id', account.id);
 
+      // Migrate messages from old accounts with same phone
+      try {
+        const phoneNumber = (me as Api.User).phone;
+        if (phoneNumber) {
+          // Find any other accounts with the same phone (old accounts before deletion)
+          const { data: oldAccounts } = await supabase
+            .from('tg_accounts')
+            .select('id')
+            .eq('phone', phoneNumber)
+            .neq('id', account.id);
+
+          if (oldAccounts && oldAccounts.length > 0) {
+            const oldAccountIds = oldAccounts.map(a => a.id);
+            logger.info('Migrating messages from old accounts', {
+              newAccountId: account.id,
+              oldAccountIds,
+              phone: phoneNumber
+            });
+
+            // Update messages to use new account_id
+            const { data: migratedMessages, error: migrateError } = await supabase
+              .from('messages')
+              .update({ account_id: account.id })
+              .in('account_id', oldAccountIds)
+              .select('id');
+
+            if (migrateError) {
+              logger.error('Failed to migrate messages', { error: migrateError });
+            } else {
+              logger.info('Messages migrated successfully', {
+                count: migratedMessages?.length || 0
+              });
+            }
+
+            // Also update leads' assigned_account_id
+            const { error: leadError } = await supabase
+              .from('leads')
+              .update({ assigned_account_id: account.id })
+              .in('assigned_account_id', oldAccountIds);
+
+            if (leadError) {
+              logger.error('Failed to migrate leads', { error: leadError });
+            }
+          }
+        }
+      } catch (migrationError) {
+        logger.error('Message migration failed', migrationError);
+      }
+
       // Setup message handler
       this.setupMessageHandler(account.id, client);
 
@@ -164,20 +215,32 @@ export class TgAccountManager {
           status: 'active',
         },
         isConnected: true,
+        connectedAt: Date.now(),
+        authKeyFailures: 0,
       });
 
       // Set online status immediately after connecting
       await this.setOnlineStatus(account.id, true);
 
       logger.info(`Connected account: ${account.phone}`);
+
+      // Import message history in background (don't await - let it run async)
+      this.importMessageHistory(account.id, client, 200, 20)
+        .then(result => {
+          logger.info('History import completed', { accountId: account.id, ...result });
+        })
+        .catch(err => {
+          logger.error('History import failed', { accountId: account.id, error: err });
+        });
+
       return true;
     } catch (error) {
       const err = error as Error & { errorMessage?: string };
       logger.error(`Failed to connect account ${account.phone}`, error);
 
       // Handle session revocation - clear the invalid session
-      if (err.errorMessage === 'SESSION_REVOKED' || err.errorMessage === 'AUTH_KEY_UNREGISTERED') {
-        logger.warn(`Session revoked for ${account.phone}, clearing session and requiring re-auth`);
+      if (err.errorMessage === 'SESSION_REVOKED' || err.errorMessage === 'AUTH_KEY_UNREGISTERED' || err.errorMessage === 'AUTH_KEY_DUPLICATED') {
+        logger.warn(`Session invalid for ${account.phone} (${err.errorMessage}), clearing session and requiring re-auth`);
         await supabase
           .from('tg_accounts')
           .update({
@@ -194,13 +257,20 @@ export class TgAccountManager {
   }
 
   private setupMessageHandler(accountId: string, client: TelegramClient): void {
+    logger.info('Setting up message handler', { accountId });
     const handler = async (event: NewMessageEvent) => {
       try {
         const message = event.message;
+        logger.debug('Received message event', { accountId, isPrivate: message.isPrivate, messageId: message.id });
         if (!message.isPrivate) return;
 
         const senderId = message.senderId?.toString();
-        if (!senderId) return;
+        if (!senderId) {
+          logger.warn('Message has no sender ID', { accountId, messageId: message.id });
+          return;
+        }
+
+        logger.info('Processing incoming private message', { accountId, senderId, messageText: message.text?.substring(0, 50) });
 
         // Get sender info including access_hash for future messaging
         const sender = await message.getSender();
@@ -216,7 +286,7 @@ export class TgAccountManager {
         // Get or create lead
         const { data: existingLead } = await supabase
           .from('leads')
-          .select('id, status_id')
+          .select('id, status_id, assigned_account_id, custom_fields')
           .eq('tg_user_id', senderId)
           .single();
 
@@ -231,7 +301,7 @@ export class TgAccountManager {
             .eq('is_default', true)
             .single();
 
-          const { data: newLead } = await supabase
+          const { data: newLead, error: insertError } = await supabase
             .from('leads')
             .insert({
               tg_user_id: senderId,
@@ -244,15 +314,33 @@ export class TgAccountManager {
             })
             .select()
             .single();
-          leadId = newLead?.id;
-        } else if (senderInfo.accessHash) {
-          // Update existing lead with access_hash if we have it
-          await supabase
-            .from('leads')
-            .update({
-              custom_fields: { tg_access_hash: senderInfo.accessHash },
-            })
-            .eq('id', leadId);
+
+          if (insertError) {
+            logger.error('Failed to create lead', { error: insertError, senderId });
+          } else {
+            leadId = newLead?.id;
+          }
+        } else {
+          // Update existing lead with access_hash and assign account if not assigned
+          const updateData: Record<string, unknown> = {};
+
+          if (senderInfo.accessHash) {
+            const existingCustomFields = (existingLead?.custom_fields as Record<string, unknown>) || {};
+            updateData.custom_fields = { ...existingCustomFields, tg_access_hash: senderInfo.accessHash };
+          }
+
+          // Assign account if lead doesn't have one
+          if (!existingLead.assigned_account_id) {
+            updateData.assigned_account_id = accountId;
+            logger.info('Assigning account to existing lead', { leadId, accountId });
+          }
+
+          if (Object.keys(updateData).length > 0) {
+            await supabase
+              .from('leads')
+              .update(updateData)
+              .eq('id', leadId);
+          }
         }
 
         // Save message
@@ -289,25 +377,41 @@ export class TgAccountManager {
 
         // Check and enroll in sequences
         if (leadId) {
-          const { data: lead } = await supabase
+          logger.debug('Checking sequences for lead', { leadId, accountId });
+          const { data: lead, error: leadError } = await supabase
             .from('leads')
             .select('*')
             .eq('id', leadId)
             .single();
 
-          if (lead) {
+          if (leadError) {
+            logger.error('Failed to fetch lead for sequence check', { error: leadError, leadId });
+          } else if (lead) {
+            logger.info('Calling checkAndEnrollSequences', { leadId: lead.id, accountId, messageText: message.text?.substring(0, 30) });
             checkAndEnrollSequences(lead as Lead, message.text || '', accountId).catch((err) => {
               logger.error('Failed to check sequences', err);
             });
+          } else {
+            logger.warn('Lead not found for sequence check', { leadId });
           }
+        } else {
+          logger.warn('No leadId available for sequence check');
         }
       } catch (error) {
         logger.error('Error handling message', error);
       }
     };
 
+    // Remove existing handler if present
+    const existingHandler = this.messageHandlers.get(accountId);
+    if (existingHandler) {
+      logger.debug('Removing existing message handler', { accountId });
+      client.removeEventHandler(existingHandler, new NewMessage({ incoming: true }));
+    }
+
     client.addEventHandler(handler, new NewMessage({ incoming: true }));
     this.messageHandlers.set(accountId, handler);
+    logger.info('Message handler registered successfully', { accountId });
   }
 
   private getMediaType(message: Api.Message): 'text' | 'video' | 'video_note' | 'voice' | 'photo' | 'document' | 'sticker' {
@@ -404,27 +508,88 @@ export class TgAccountManager {
 
       // Save session
       const sessionString = (client.session as StringSession).save();
+      const me = user as Api.User;
       await supabase
         .from('tg_accounts')
         .update({
           session_string: sessionString,
           status: 'active',
-          username: (user as Api.User).username || null,
-          first_name: (user as Api.User).firstName || null,
-          last_name: (user as Api.User).lastName || null,
+          username: me.username || null,
+          first_name: me.firstName || null,
+          last_name: me.lastName || null,
           last_active_at: new Date().toISOString(),
         })
         .eq('id', accountId);
+
+      // Migrate messages from old accounts with same phone
+      try {
+        const phoneNumber = me.phone;
+        if (phoneNumber) {
+          // Find any other accounts with the same phone (old accounts before deletion)
+          const { data: oldAccounts } = await supabase
+            .from('tg_accounts')
+            .select('id')
+            .eq('phone', phoneNumber)
+            .neq('id', accountId);
+
+          if (oldAccounts && oldAccounts.length > 0) {
+            const oldAccountIds = oldAccounts.map(a => a.id);
+            logger.info('Migrating messages from old accounts', {
+              newAccountId: accountId,
+              oldAccountIds,
+              phone: phoneNumber
+            });
+
+            // Update messages to use new account_id
+            const { data: migratedMessages, error: migrateError } = await supabase
+              .from('messages')
+              .update({ account_id: accountId })
+              .in('account_id', oldAccountIds)
+              .select('id');
+
+            if (migrateError) {
+              logger.error('Failed to migrate messages', { error: migrateError });
+            } else {
+              logger.info('Messages migrated successfully', {
+                count: migratedMessages?.length || 0
+              });
+            }
+
+            // Also update leads' assigned_account_id
+            const { error: leadError } = await supabase
+              .from('leads')
+              .update({ assigned_account_id: accountId })
+              .in('assigned_account_id', oldAccountIds);
+
+            if (leadError) {
+              logger.error('Failed to migrate leads', { error: leadError });
+            }
+          }
+        }
+      } catch (migrationError) {
+        logger.error('Message migration failed', migrationError);
+      }
 
       // Move to connected clients
       this.clients.set(accountId, {
         client,
         account: { id: accountId, phone: '', status: 'active' } as TgAccount,
         isConnected: true,
+        connectedAt: Date.now(),
+        authKeyFailures: 0,
       });
       this.setupMessageHandler(accountId, client);
       await this.setOnlineStatus(accountId, true);
       this.startOnlineHeartbeat();
+
+      // Import message history in background (don't await - let it run async)
+      this.importMessageHistory(accountId, client, 200, 20)
+        .then(result => {
+          logger.info('History import completed', { accountId, ...result });
+        })
+        .catch(err => {
+          logger.error('History import failed', { accountId, error: err });
+        });
 
       this.qrAuthState.delete(accountId);
     }).catch((error) => {
@@ -600,6 +765,8 @@ export class TgAccountManager {
       .eq('id', accountId);
 
     entry.isConnected = true;
+    entry.connectedAt = Date.now();
+    entry.authKeyFailures = 0;
     this.setupMessageHandler(accountId, entry.client);
 
     // Set online status after successful auth
@@ -623,22 +790,58 @@ export class TgAccountManager {
       throw new Error('Account not connected');
     }
 
-    // Try to use InputPeerUser with access_hash for reliable message delivery
-    let peer: Api.InputPeerUser | string = userId;
-    if (accessHash) {
-      try {
-        peer = new Api.InputPeerUser({
-          userId: bigInt(userId),
-          accessHash: bigInt(accessHash),
-        });
-      } catch {
-        // Fallback to string userId if BigInt conversion fails
-        peer = userId;
+    try {
+      // Try to use InputPeerUser with access_hash for reliable message delivery
+      let peer: Api.InputPeerUser | string = userId;
+      if (accessHash) {
+        try {
+          peer = new Api.InputPeerUser({
+            userId: bigInt(userId),
+            accessHash: bigInt(accessHash),
+          });
+        } catch {
+          // Fallback to string userId if BigInt conversion fails
+          peer = userId;
+        }
       }
-    }
 
-    const result = await entry.client.sendMessage(peer, { message: text });
-    return result;
+      const result = await entry.client.sendMessage(peer, { message: text });
+
+      // Mark as read to ensure double checkmarks
+      try {
+        await entry.client.invoke(
+          new Api.messages.ReadHistory({
+            peer,
+            maxId: 0,
+          })
+        );
+      } catch {
+        // Ignore errors - not critical
+      }
+
+      return result;
+    } catch (error) {
+      const err = error as Error & { errorMessage?: string };
+
+      // Handle AUTH_KEY_DUPLICATED - mark account as disconnected
+      if (err.errorMessage === 'AUTH_KEY_DUPLICATED') {
+        logger.error(`AUTH_KEY_DUPLICATED for account ${entry.account.phone}, marking as disconnected`);
+        entry.isConnected = false;
+
+        // Update DB status
+        await supabase
+          .from('tg_accounts')
+          .update({
+            session_string: null,
+            status: 'auth_required',
+          })
+          .eq('id', accountId);
+
+        throw new Error('Account authentication key is duplicated. Please re-authenticate.');
+      }
+
+      throw error;
+    }
   }
 
   async sendMedia(
@@ -655,52 +858,75 @@ export class TgAccountManager {
       throw new Error('Account not connected');
     }
 
-    // Try to use InputPeerUser with access_hash for reliable message delivery
-    let peer: Api.InputPeerUser | string = userId;
-    if (accessHash) {
-      try {
-        peer = new Api.InputPeerUser({
-          userId: bigInt(userId),
-          accessHash: bigInt(accessHash),
-        });
-      } catch {
-        peer = userId;
+    try {
+      // Try to use InputPeerUser with access_hash for reliable message delivery
+      let peer: Api.InputPeerUser | string = userId;
+      if (accessHash) {
+        try {
+          peer = new Api.InputPeerUser({
+            userId: bigInt(userId),
+            accessHash: bigInt(accessHash),
+          });
+        } catch {
+          peer = userId;
+        }
       }
+
+      const sendOptions: Parameters<typeof entry.client.sendFile>[1] = {
+        file: mediaPath,
+        caption,
+      };
+
+      if (asVoice) {
+        // Voice message - set voice note flag and attributes
+        sendOptions.voiceNote = true;
+        sendOptions.attributes = [
+          new Api.DocumentAttributeAudio({
+            voice: true,
+            duration: 0, // Will be calculated by Telegram
+            title: undefined,
+            performer: undefined,
+          }),
+        ];
+      } else if (asVideoNote) {
+        // Video note (circle) - set video note flag and attributes
+        sendOptions.videoNote = true;
+        sendOptions.attributes = [
+          new Api.DocumentAttributeVideo({
+            roundMessage: true,
+            duration: 0, // Will be calculated by Telegram
+            w: 480,
+            h: 480,
+            supportsStreaming: true,
+          }),
+        ];
+      }
+
+      const result = await entry.client.sendFile(peer, sendOptions);
+
+      return result;
+    } catch (error) {
+      const err = error as Error & { errorMessage?: string };
+
+      // Handle AUTH_KEY_DUPLICATED - mark account as disconnected
+      if (err.errorMessage === 'AUTH_KEY_DUPLICATED') {
+        logger.error(`AUTH_KEY_DUPLICATED for account ${entry.account.phone}, marking as disconnected`);
+        entry.isConnected = false;
+
+        // Update DB status
+        await supabase
+          .from('tg_accounts')
+          .update({
+            session_string: null,
+            status: 'auth_required',
+          })
+          .eq('id', accountId);
+
+        throw new Error('Account authentication key is duplicated. Please re-authenticate.');
+      }
+
+      throw error;
     }
-
-    const sendOptions: Parameters<typeof entry.client.sendFile>[1] = {
-      file: mediaPath,
-      caption,
-    };
-
-    if (asVoice) {
-      // Voice message - set voice note flag and attributes
-      sendOptions.voiceNote = true;
-      sendOptions.attributes = [
-        new Api.DocumentAttributeAudio({
-          voice: true,
-          duration: 0, // Will be calculated by Telegram
-          title: undefined,
-          performer: undefined,
-        }),
-      ];
-    } else if (asVideoNote) {
-      // Video note (circle) - set video note flag and attributes
-      sendOptions.videoNote = true;
-      sendOptions.attributes = [
-        new Api.DocumentAttributeVideo({
-          roundMessage: true,
-          duration: 0, // Will be calculated by Telegram
-          w: 480,
-          h: 480,
-          supportsStreaming: true,
-        }),
-      ];
-    }
-
-    const result = await entry.client.sendFile(peer, sendOptions);
-
-    return result;
   }
 
   async sendToGroup(
@@ -867,14 +1093,56 @@ export class TgAccountManager {
       return;
     }
 
+    // Skip online status for recently connected accounts (within 5 minutes)
+    // This prevents AUTH_KEY_DUPLICATED errors right after QR auth
+    const timeSinceConnect = Date.now() - (entry.connectedAt || 0);
+    if (timeSinceConnect < 5 * 60 * 1000) {
+      logger.debug('Skipping online status for recently connected account', {
+        accountId,
+        phone: entry.account.phone,
+        timeSinceConnectSeconds: Math.floor(timeSinceConnect / 1000)
+      });
+      return;
+    }
+
     try {
       await entry.client.invoke(
         new Api.account.UpdateStatus({
           offline: !online,
         })
       );
+
+      // Reset failure counter on success
+      entry.authKeyFailures = 0;
+
       logger.debug(`Set online status for ${entry.account.phone}: ${online ? 'online' : 'offline'}`);
     } catch (error) {
+      const err = error as Error & { errorMessage?: string };
+
+      // Handle AUTH_KEY_DUPLICATED - don't immediately clear session
+      if (err.errorMessage === 'AUTH_KEY_DUPLICATED') {
+        entry.authKeyFailures = (entry.authKeyFailures || 0) + 1;
+
+        logger.warn(`AUTH_KEY_DUPLICATED for ${entry.account.phone} (failure ${entry.authKeyFailures}/3)`);
+
+        // Only clear session after 3 consecutive failures
+        if (entry.authKeyFailures >= 3) {
+          logger.error(`AUTH_KEY_DUPLICATED persisted after 3 attempts for ${entry.account.phone}, marking as disconnected and requiring re-auth`);
+          entry.isConnected = false;
+
+          // Update DB status
+          await supabase
+            .from('tg_accounts')
+            .update({
+              session_string: null,
+              status: 'auth_required',
+            })
+            .eq('id', accountId);
+        }
+
+        return;
+      }
+
       logger.error(`Failed to set online status for ${entry.account.phone}`, error);
     }
   }
@@ -919,6 +1187,184 @@ export class TgAccountManager {
       clearInterval(this.onlineHeartbeatInterval);
       this.onlineHeartbeatInterval = null;
       logger.info('Stopped online status heartbeat');
+    }
+  }
+
+  /**
+   * Import message history from Telegram for a connected account.
+   * This allows batch enrollment to process leads who messaged before the account was connected.
+   */
+  private async importMessageHistory(
+    accountId: string,
+    client: TelegramClient,
+    maxDialogs: number = 200,
+    messagesPerDialog: number = 20
+  ): Promise<{ dialogsProcessed: number; messagesImported: number; leadsCreated: number }> {
+    const historyLogger = createLogger('TgAccountManager:HistoryImport');
+    let dialogsProcessed = 0;
+    let messagesImported = 0;
+    let leadsCreated = 0;
+
+    try {
+      historyLogger.info('Starting message history import', { accountId, maxDialogs, messagesPerDialog });
+
+      // Get dialogs (conversations)
+      const dialogs = await client.getDialogs({ limit: maxDialogs });
+
+      // Filter for private chats only (User entities, not groups/channels)
+      const privateDialogs = dialogs.filter(dialog => {
+        const entity = dialog.entity;
+        return entity && 'firstName' in entity && !('megagroup' in entity);
+      });
+
+      historyLogger.info('Found private dialogs', {
+        total: dialogs.length,
+        privateCount: privateDialogs.length
+      });
+
+      for (const dialog of privateDialogs) {
+        try {
+          const user = dialog.entity as Api.User;
+          if (!user || user.self || user.bot) continue; // Skip self and bots
+
+          const tgUserId = user.id.toString();
+          const accessHash = user.accessHash?.toString() || null;
+
+          // Get or create lead
+          const lead = await this.getOrCreateLeadForImport(
+            accountId,
+            tgUserId,
+            user.username || null,
+            user.firstName || null,
+            user.lastName || null,
+            accessHash
+          );
+
+          if (!lead) continue;
+
+          // Check if this is a new lead
+          if (lead.created) leadsCreated++;
+
+          // Get recent messages from this dialog
+          const messages = await client.getMessages(user, { limit: messagesPerDialog });
+
+          for (const msg of messages) {
+            if (!msg.text && !msg.media) continue; // Skip empty messages
+
+            const direction = msg.out ? 'outgoing' : 'incoming';
+            const msgDate = new Date(msg.date * 1000);
+
+            // Check if message already exists (by tg_message_id)
+            const { data: existingMsg } = await supabase
+              .from('messages')
+              .select('id')
+              .eq('tg_message_id', msg.id.toString())
+              .eq('account_id', accountId)
+              .maybeSingle();
+
+            if (existingMsg) continue; // Skip already imported
+
+            // Save message
+            await supabase.from('messages').insert({
+              lead_id: lead.id,
+              account_id: accountId,
+              direction,
+              type: 'text',
+              content: msg.text || '',
+              tg_message_id: msg.id.toString(),
+              status: 'delivered',
+              sent_at: msgDate.toISOString(),
+            });
+
+            messagesImported++;
+          }
+
+          dialogsProcessed++;
+
+          // Small delay to avoid rate limits
+          await new Promise(resolve => setTimeout(resolve, 100));
+
+        } catch (dialogError) {
+          historyLogger.error('Error processing dialog', { error: dialogError });
+          continue;
+        }
+      }
+
+      historyLogger.info('Message history import completed', {
+        accountId,
+        dialogsProcessed,
+        messagesImported,
+        leadsCreated
+      });
+
+      return { dialogsProcessed, messagesImported, leadsCreated };
+    } catch (error) {
+      historyLogger.error('Failed to import message history', error);
+      return { dialogsProcessed, messagesImported, leadsCreated };
+    }
+  }
+
+  /**
+   * Get or create lead for history import
+   */
+  private async getOrCreateLeadForImport(
+    accountId: string,
+    tgUserId: string,
+    username: string | null,
+    firstName: string | null,
+    lastName: string | null,
+    accessHash: string | null
+  ): Promise<{ id: string; created: boolean } | null> {
+    try {
+      // Check if lead exists
+      const { data: existingLead } = await supabase
+        .from('leads')
+        .select('id')
+        .eq('tg_user_id', tgUserId)
+        .maybeSingle();
+
+      if (existingLead) {
+        // Update access_hash if we have it
+        if (accessHash) {
+          await supabase
+            .from('leads')
+            .update({
+              custom_fields: { tg_access_hash: accessHash }
+            })
+            .eq('id', existingLead.id);
+        }
+        return { id: existingLead.id, created: false };
+      }
+
+      // Get default status
+      const { data: defaultStatus } = await supabase
+        .from('lead_statuses')
+        .select('id')
+        .eq('is_default', true)
+        .maybeSingle();
+
+      // Create new lead
+      const { data: newLead, error } = await supabase
+        .from('leads')
+        .insert({
+          tg_user_id: tgUserId,
+          username,
+          first_name: firstName,
+          last_name: lastName,
+          assigned_account_id: accountId,
+          status_id: defaultStatus?.id,
+          custom_fields: accessHash ? { tg_access_hash: accessHash } : {},
+        })
+        .select('id')
+        .single();
+
+      if (error) {
+        return null;
+      }
+
+      return { id: newLead.id, created: true };
+    } catch (error) {
+      return null;
     }
   }
 }
