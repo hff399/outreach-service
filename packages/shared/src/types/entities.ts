@@ -187,6 +187,24 @@ export type ExitCondition = {
   type: 'replied' | 'status_changed' | 'unsubscribed' | 'manual';
 };
 
+export type SequenceEnrollmentStatus = 'active' | 'paused' | 'completed' | 'failed' | 'exited';
+
+export type SequenceEnrollment = {
+  id: string;
+  sequence_id: string;
+  lead_id: string;
+  account_id: string | null;
+  status: SequenceEnrollmentStatus;
+  current_step: number;
+  next_step_at: string | null;
+  waiting_for: 'reply' | 'no_reply' | 'time' | null;
+  wait_until: string | null;
+  started_at: string;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 // ==========================================
 // Lead Types
 // ==========================================

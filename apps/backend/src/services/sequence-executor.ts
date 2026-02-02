@@ -2,6 +2,14 @@ import { supabase } from '../lib/supabase.js';
 import { createLogger } from '../lib/logger.js';
 import { tgManager } from '../index.js';
 import type { Sequence, SequenceEnrollment, Lead } from '@outreach/shared/types/entities.js';
+import type {
+  SequenceEnrollmentRow,
+  SequenceEnrollmentUpdate,
+  LeadUpdate,
+  MessageInsert,
+  ReminderInsert,
+  LeadTagInsert
+} from '../lib/db-helpers.js';
 
 const logger = createLogger('SequenceExecutor');
 
@@ -49,29 +57,54 @@ export async function executeSequenceStep(
   enrollmentId: string,
   stepId: string
 ): Promise<void> {
+  logger.info('executeSequenceStep called', { enrollmentId, stepId });
+
   // Get enrollment with sequence
-  const { data: enrollment } = await supabase
+  const { data: enrollment, error: fetchError } = await supabase
     .from('sequence_enrollments')
     .select('*, sequences(*), leads(*)')
     .eq('id', enrollmentId)
     .single();
 
-  if (!enrollment || enrollment.status !== 'active') {
-    logger.warn(`Enrollment ${enrollmentId} not found or not active`);
+  if (fetchError) {
+    logger.error('Failed to fetch enrollment', { error: fetchError, enrollmentId });
     return;
   }
 
-  const sequence = enrollment.sequences as Sequence;
-  const lead = enrollment.leads as Lead;
+  if (!enrollment) {
+    logger.warn(`Enrollment ${enrollmentId} not found`);
+    return;
+  }
+
+  const typedEnrollment = enrollment as SequenceEnrollmentRow & {
+    sequences: Sequence;
+    leads: Lead;
+  };
+
+  logger.debug('Enrollment fetched', { enrollmentId, status: typedEnrollment.status, accountId: typedEnrollment.account_id });
+
+  if (typedEnrollment.status !== 'active') {
+    logger.warn(`Enrollment ${enrollmentId} not active`, { status: typedEnrollment.status });
+    return;
+  }
+
+  const sequence = typedEnrollment.sequences;
+  const lead = typedEnrollment.leads;
+
+  if (!sequence || !lead) {
+    logger.error('Missing sequence or lead data', { enrollmentId, hasSequence: !!sequence, hasLead: !!lead });
+    return;
+  }
+
   const steps = sequence.steps as SequenceStep[];
   const step = steps.find(s => s.id === stepId);
 
   if (!step) {
-    logger.error(`Step ${stepId} not found in sequence ${sequence.id}`);
+    logger.error(`Step ${stepId} not found in sequence ${sequence.id}`, { availableSteps: steps.map(s => s.id) });
     return;
   }
 
-  logger.info(`Executing step ${step.type} for lead ${lead.id} in sequence ${sequence.name}`);
+  logger.info(`Executing step ${step.type} for lead ${lead.id} in sequence ${sequence.name}`, { stepId, leadTgId: lead.tg_user_id });
 
   try {
     // Execute based on step type
@@ -105,16 +138,38 @@ export async function executeSequenceStep(
     // Advance to next step
     await advanceToNextStep(enrollment as SequenceEnrollment, step, steps);
   } catch (error) {
-    logger.error(`Failed to execute step ${stepId}`, error);
+    const err = error as Error;
+    logger.error(`Failed to execute step ${stepId}`, {
+      error: err.message,
+      stack: err.stack,
+      enrollmentId,
+      stepId
+    });
 
-    // Update enrollment with error
-    await supabase
-      .from('sequence_enrollments')
-      .update({
-        status: 'failed',
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', enrollmentId);
+    // If the error is auth-related, pause the enrollment to prevent endless retries
+    const isAuthError = err.message.includes('AUTH_KEY_DUPLICATED') ||
+                        err.message.includes('not connected') ||
+                        err.message.includes('re-authenticate');
+
+    if (isAuthError) {
+      logger.warn('Pausing enrollment due to authentication error', { enrollmentId, error: err.message });
+      await supabase
+        .from('sequence_enrollments')
+        .update({
+          status: 'paused',
+          waiting_for: 'account_auth'
+        } as SequenceEnrollmentUpdate)
+        .eq('id', enrollmentId);
+    } else {
+      // Update enrollment with error
+      await supabase
+        .from('sequence_enrollments')
+        .update({
+          status: 'failed',
+          completed_at: new Date().toISOString(),
+        } as SequenceEnrollmentUpdate)
+        .eq('id', enrollmentId);
+    }
   }
 }
 
@@ -123,17 +178,31 @@ async function executeMessageStep(
   lead: Lead,
   step: SequenceStep
 ): Promise<void> {
+  logger.info('executeMessageStep called', { enrollmentId: enrollment.id, leadId: lead.id, stepType: step.message_type });
+
   const accountId = enrollment.account_id || lead.assigned_account_id;
   if (!accountId) {
+    logger.error('No account assigned for sending message', { enrollmentId: enrollment.id, leadId: lead.id });
     throw new Error('No account assigned for sending message');
   }
 
+  logger.debug('Using account', { accountId, enrollmentAccountId: enrollment.account_id, leadAccountId: lead.assigned_account_id });
+
   if (!tgManager.isConnected(accountId)) {
+    logger.error('Account not connected', { accountId });
     throw new Error(`Account ${accountId} is not connected`);
   }
 
   // Get access_hash from lead's custom_fields
-  const accessHash = (lead.custom_fields as Record<string, string> | null)?.tg_access_hash;
+  const customFields = lead.custom_fields as Record<string, string> | null;
+  const accessHash = customFields?.tg_access_hash;
+  logger.info('Lead info for messaging', {
+    leadId: lead.id,
+    tgUserId: lead.tg_user_id,
+    hasAccessHash: !!accessHash,
+    accessHashPreview: accessHash ? `${accessHash.substring(0, 10)}...` : 'none',
+    customFieldsKeys: customFields ? Object.keys(customFields) : []
+  });
 
   const content = step.content || '';
 
@@ -143,6 +212,19 @@ async function executeMessageStep(
     .replace(/\{last_name\}/g, lead.last_name || '')
     .replace(/\{username\}/g, lead.username || '')
     .replace(/\{full_name\}/g, `${lead.first_name || ''} ${lead.last_name || ''}`.trim());
+
+  logger.debug('Message content', { original: content?.substring(0, 50), processed: processedContent?.substring(0, 50) });
+
+  // Validate content is not empty
+  if (!processedContent || processedContent.trim() === '') {
+    logger.error('Cannot send empty message', {
+      enrollmentId: enrollment.id,
+      stepId: step.id,
+      originalContent: step.content,
+      processedContent
+    });
+    throw new Error('Message content is empty. Please add text content to the sequence step.');
+  }
 
   // Send typing status before sending message
   try {
@@ -155,7 +237,9 @@ async function executeMessageStep(
   }
 
   if (step.message_type === 'text') {
+    logger.info('Sending text message', { accountId, tgUserId: lead.tg_user_id });
     const result = await tgManager.sendMessage(accountId, lead.tg_user_id, processedContent, accessHash);
+    logger.info('Message sent', { success: !!result, messageId: result?.id });
     if (result) {
       await saveOutgoingMessage(lead.id, accountId, 'text', processedContent, result.id.toString());
     }
@@ -190,7 +274,7 @@ async function executeStatusChangeStep(lead: Lead, step: SequenceStep): Promise<
 
   await supabase
     .from('leads')
-    .update({ status_id: step.status_id })
+    .update({ status_id: step.status_id } as LeadUpdate)
     .eq('id', lead.id);
 
   logger.debug(`Changed status of lead ${lead.id} to ${step.status_id}`);
@@ -207,7 +291,7 @@ async function executeReminderStep(lead: Lead, step: SequenceStep): Promise<void
     due_at: dueAt,
     priority: step.reminder.priority || 'medium',
     status: 'pending',
-  });
+  } as ReminderInsert);
 
   logger.debug(`Created reminder for lead ${lead.id}: ${step.reminder.title}`);
 }
@@ -218,7 +302,7 @@ async function executeTagStep(lead: Lead, step: SequenceStep): Promise<void> {
     const tagsToInsert = step.tags_to_add.map(tag => ({
       lead_id: lead.id,
       tag,
-    }));
+    } as LeadTagInsert));
 
     await supabase.from('lead_tags').upsert(tagsToInsert, {
       onConflict: 'lead_id,tag',
@@ -243,7 +327,7 @@ async function executeAssignStep(lead: Lead, step: SequenceStep): Promise<void> 
 
   await supabase
     .from('leads')
-    .update({ assigned_account_id: step.assign_to_account_id })
+    .update({ assigned_account_id: step.assign_to_account_id } as LeadUpdate)
     .eq('id', lead.id);
 
   logger.debug(`Assigned lead ${lead.id} to account ${step.assign_to_account_id}`);
@@ -292,14 +376,29 @@ async function executeWaitStep(
   const timeoutMs = (step.wait_condition.timeout_minutes || 60) * 60 * 1000;
   const waitUntil = new Date(Date.now() + timeoutMs).toISOString();
 
-  await supabase
+  const { error } = await supabase
     .from('sequence_enrollments')
     .update({
       waiting_for: step.wait_condition.type,
       wait_until: waitUntil,
       next_step_at: null, // Clear scheduled step
-    })
+    } as SequenceEnrollmentUpdate)
     .eq('id', enrollment.id);
+
+  if (error) {
+    // If columns don't exist, log warning but don't fail
+    if (error.message?.includes('waiting_for') || error.message?.includes('wait_until')) {
+      logger.warn('MIGRATION REQUIRED: waiting_for/wait_until columns not found. Run: supabase/migrations/20260130000000_add_sequence_enrollment_columns.sql');
+      // Just clear next_step_at as a fallback
+      await supabase
+        .from('sequence_enrollments')
+        .update({ next_step_at: null } as SequenceEnrollmentUpdate)
+        .eq('id', enrollment.id);
+    } else {
+      logger.error('Failed to set wait condition', { error, enrollmentId: enrollment.id });
+    }
+    return;
+  }
 
   logger.debug(`Set wait condition ${step.wait_condition.type} for enrollment ${enrollment.id}`);
 }
@@ -383,8 +482,9 @@ async function goToStep(
   nextStepId: string,
   allSteps: SequenceStep[]
 ): Promise<void> {
-  const nextStep = allSteps.find(s => s.id === nextStepId);
-  if (!nextStep) {
+  const nextStepIndex = allSteps.findIndex(s => s.id === nextStepId);
+  const nextStep = allSteps[nextStepIndex];
+  if (!nextStep || nextStepIndex === -1) {
     await completeEnrollment(enrollment);
     return;
   }
@@ -395,9 +495,9 @@ async function goToStep(
   await supabase
     .from('sequence_enrollments')
     .update({
-      current_step_id: nextStepId,
+      current_step: nextStepIndex,
       next_step_at: nextStepAt,
-    })
+    } as SequenceEnrollmentUpdate)
     .eq('id', enrollment.id);
 
   // Execute immediately if no delay
@@ -431,9 +531,8 @@ async function completeEnrollment(enrollment: SequenceEnrollment): Promise<void>
     .update({
       status: 'completed',
       completed_at: new Date().toISOString(),
-      current_step_id: null,
       next_step_at: null,
-    })
+    } as SequenceEnrollmentUpdate)
     .eq('id', enrollment.id);
 
   logger.info(`Completed sequence enrollment ${enrollment.id}`);
@@ -457,42 +556,60 @@ async function saveOutgoingMessage(
     status: 'sent',
     tg_message_id: tgMessageId,
     sent_at: new Date().toISOString(),
-  });
+  } as MessageInsert);
 
   // Update lead's last_message_at
   await supabase
     .from('leads')
-    .update({ last_message_at: new Date().toISOString() })
+    .update({ last_message_at: new Date().toISOString() } as LeadUpdate)
     .eq('id', leadId);
 }
 
 // Handle reply to check if waiting enrollment should proceed
 export async function handleLeadReply(leadId: string): Promise<void> {
-  const { data: waitingEnrollments } = await supabase
-    .from('sequence_enrollments')
-    .select('*, sequences(*)')
-    .eq('lead_id', leadId)
-    .eq('status', 'active')
-    .eq('waiting_for', 'reply');
-
-  if (!waitingEnrollments || waitingEnrollments.length === 0) return;
-
-  for (const enrollment of waitingEnrollments) {
-    const sequence = enrollment.sequences as Sequence;
-    const steps = sequence.steps as SequenceStep[];
-    const currentStep = steps.find(s => s.id === enrollment.current_step_id);
-
-    if (!currentStep) continue;
-
-    // Clear wait and advance
-    await supabase
+  try {
+    const { data: waitingEnrollments, error } = await supabase
       .from('sequence_enrollments')
-      .update({
-        waiting_for: null,
-        wait_until: null,
-      })
-      .eq('id', enrollment.id);
+      .select('*, sequences(*)')
+      .eq('lead_id', leadId)
+      .eq('status', 'active')
+      .eq('waiting_for', 'reply');
 
-    await advanceToNextStep(enrollment as SequenceEnrollment, currentStep, steps);
+    // If the query fails due to missing column, just return silently
+    if (error) {
+      if (error.message?.includes('waiting_for')) {
+        logger.warn('waiting_for column not found - wait functionality disabled. Run the migration: supabase/migrations/20260130000000_add_sequence_enrollment_columns.sql');
+        return;
+      }
+      logger.error('Failed to check waiting enrollments', { error, leadId });
+      return;
+    }
+
+    if (!waitingEnrollments || waitingEnrollments.length === 0) return;
+
+    for (const enrollment of waitingEnrollments) {
+      const typedEnrollment = enrollment as SequenceEnrollmentRow & {
+        sequences: Sequence;
+      };
+      const sequence = typedEnrollment.sequences;
+      const steps = sequence.steps as SequenceStep[];
+      const currentStepIndex = typedEnrollment.current_step ?? 0;
+      const currentStep = steps[currentStepIndex];
+
+      if (!currentStep) continue;
+
+      // Clear wait and advance
+      await supabase
+        .from('sequence_enrollments')
+        .update({
+          waiting_for: null,
+          wait_until: null,
+        } as SequenceEnrollmentUpdate)
+        .eq('id', typedEnrollment.id);
+
+      await advanceToNextStep(typedEnrollment as SequenceEnrollment, currentStep, steps);
+    }
+  } catch (err) {
+    logger.error('Error handling lead reply', err);
   }
 }
