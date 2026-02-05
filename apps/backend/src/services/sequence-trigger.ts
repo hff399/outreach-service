@@ -16,31 +16,48 @@ export async function checkAndEnrollSequences(
   accountId: string
 ): Promise<void> {
   try {
+    logger.info('checkAndEnrollSequences called', { leadId: lead.id, accountId, messageText: messageText?.substring(0, 50) });
+
     // CRITICAL FIX: Check if we have EVER sent an outgoing message to this lead
     // If yes, do NOT trigger auto-reply - only trigger on FIRST contact
-    const { data: existingOutgoing } = await supabase
+    const { data: existingOutgoing, error: outgoingError } = await supabase
       .from('messages')
       .select('id')
       .eq('lead_id', lead.id)
       .eq('direction', 'outgoing')
       .limit(1);
 
+    if (outgoingError) {
+      logger.error('Error checking outgoing messages', { error: outgoingError, leadId: lead.id });
+    }
+
+    logger.info('Outgoing messages check', { leadId: lead.id, count: existingOutgoing?.length || 0 });
+
     if (existingOutgoing && existingOutgoing.length > 0) {
       // Lead has already received a message from us - don't auto-enroll
       // Still check for reply handling below
-      logger.debug('Lead already has outgoing messages, skipping auto-enrollment', { leadId: lead.id });
+      logger.info('Lead already has outgoing messages, skipping auto-enrollment', { leadId: lead.id });
       await handleLeadReply(lead.id);
       return;
     }
 
     // Get active sequences for this account
-    const { data: sequences } = await supabase
+    const { data: sequences, error: seqError } = await supabase
       .from('sequences')
       .select('*')
       .eq('status', 'active')
       .contains('assigned_accounts', [accountId]);
 
-    if (!sequences?.length) return;
+    if (seqError) {
+      logger.error('Error fetching sequences', { error: seqError, accountId });
+    }
+
+    logger.info('Found sequences for account', { accountId, count: sequences?.length || 0, sequences: sequences?.map(s => ({ id: s.id, name: s.name, trigger: s.trigger })) });
+
+    if (!sequences?.length) {
+      logger.info('No active sequences found for account', { accountId });
+      return;
+    }
 
     for (const sequence of sequences) {
       const seq = sequence as Sequence;
