@@ -16,6 +16,23 @@ export async function checkAndEnrollSequences(
   accountId: string
 ): Promise<void> {
   try {
+    // CRITICAL FIX: Check if we have EVER sent an outgoing message to this lead
+    // If yes, do NOT trigger auto-reply - only trigger on FIRST contact
+    const { data: existingOutgoing } = await supabase
+      .from('messages')
+      .select('id')
+      .eq('lead_id', lead.id)
+      .eq('direction', 'outgoing')
+      .limit(1);
+
+    if (existingOutgoing && existingOutgoing.length > 0) {
+      // Lead has already received a message from us - don't auto-enroll
+      // Still check for reply handling below
+      logger.debug('Lead already has outgoing messages, skipping auto-enrollment', { leadId: lead.id });
+      await handleLeadReply(lead.id);
+      return;
+    }
+
     // Get active sequences for this account
     const { data: sequences } = await supabase
       .from('sequences')
