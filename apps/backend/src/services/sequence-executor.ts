@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase.js';
 import { createLogger } from '../lib/logger.js';
 import { tgManager } from '../index.js';
+import { messageQueue } from './message-queue.js';
 import type { Sequence, SequenceEnrollment, Lead } from '@outreach/shared/types/entities.js';
 import type {
   SequenceEnrollmentRow,
@@ -500,8 +501,22 @@ async function goToStep(
     } as SequenceEnrollmentUpdate)
     .eq('id', enrollment.id);
 
-  // Execute immediately if no delay
-  if (!nextStepAt) {
+  // Use the queue for execution - either delayed or immediate
+  if (delayMs > 0) {
+    // Queue for later execution
+    messageQueue.enqueue('sequence_step', {
+      enrollmentId: enrollment.id,
+      stepId: nextStepId,
+      sequenceId: enrollment.sequence_id,
+      leadId: enrollment.lead_id,
+    }, {
+      priority: 7,
+      maxAttempts: 3,
+      delayMs,
+    });
+    logger.info(`Queued next step ${nextStepId} for enrollment ${enrollment.id} with ${delayMs}ms delay`);
+  } else {
+    // Execute immediately
     await executeSequenceStep(enrollment.id, nextStepId);
   }
 }

@@ -4,9 +4,9 @@ import { createLogger } from '../lib/logger.js';
 import { TgAccountManager } from '../services/tg-account-manager.js';
 import { WebSocketHub } from '../services/websocket-hub.js';
 import { CampaignService } from '../services/campaign-service.js';
+import { messageQueue, type QueueItem, type CampaignMessagePayload } from '../services/message-queue.js';
 import type { TgAccountRow, TgAccountUpdate } from '../lib/db-helpers.js';
 import type { TgAccount } from '@outreach/shared/types/entities.js';
-// Note: Sequence processing is now handled by sequence-scheduler.ts (started in index.ts)
 
 const logger = createLogger('JobScheduler');
 
@@ -19,10 +19,60 @@ export class JobScheduler {
     private wsHub: WebSocketHub
   ) {
     this.campaignService = new CampaignService(tgManager, wsHub);
+    this.registerQueueProcessors();
+  }
+
+  /**
+   * Register queue processors for different message types
+   */
+  private registerQueueProcessors(): void {
+    // Register campaign message processor
+    messageQueue.registerProcessor('campaign_message', async (item: QueueItem) => {
+      const payload = item.payload as unknown as CampaignMessagePayload;
+      await this.processCampaignMessage(payload);
+    });
+
+    // Register sequence step processor (already handled in sequence-scheduler.ts)
+    // The sequence_step type is registered when importing sequence-scheduler
+
+    logger.info('Queue processors registered');
+  }
+
+  /**
+   * Process a campaign message - send to group
+   */
+  private async processCampaignMessage(payload: CampaignMessagePayload): Promise<void> {
+    const { campaignId, groupUsername, groupTitle, accountId, messageText } = payload;
+
+    logger.info(`Processing campaign message for group ${groupTitle}`, { campaignId, accountId });
+
+    // Check if campaign is still active
+    const { data: campaign } = await supabase
+      .from('campaigns')
+      .select('status')
+      .eq('id', campaignId)
+      .single();
+
+    if (campaign?.status !== 'active') {
+      logger.info(`Campaign ${campaignId} no longer active, skipping message`);
+      return;
+    }
+
+    // Check if account is connected
+    if (!this.tgManager.isConnected(accountId)) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+
+    // Send message to group
+    await this.tgManager.sendToGroup(accountId, groupUsername, messageText);
+
+    logger.info(`Sent campaign message to ${groupTitle} via account ${accountId.slice(0, 8)}`);
   }
 
   start(): void {
-    // Note: Sequence steps are processed by startSequenceScheduler() in index.ts
+    // Start the message queue processor
+    messageQueue.start(1000); // Process every 1 second
+    logger.info('Message queue processor started');
 
     // Reset daily message counters at midnight UTC
     this.jobs.push(
@@ -38,10 +88,23 @@ export class JobScheduler {
       })
     );
 
+    // Log queue stats every minute
+    this.jobs.push(
+      new Cron('* * * * *', () => {
+        const stats = messageQueue.getStats();
+        if (stats.total > 0 || stats.processed > 0) {
+          logger.info('Queue stats', stats);
+        }
+      })
+    );
+
     logger.info('Job scheduler started');
   }
 
   stop(): void {
+    // Stop the message queue
+    messageQueue.stop();
+
     for (const job of this.jobs) {
       job.stop();
     }
@@ -54,7 +117,7 @@ export class JobScheduler {
       await supabase
         .from('tg_accounts')
         .update({ messages_sent_today: 0 } as TgAccountUpdate)
-        .neq('id', '00000000-0000-0000-0000-000000000000'); // Update all
+        .neq('id', '00000000-0000-0000-0000-000000000000');
 
       logger.info('Reset daily message counters');
     } catch (error) {
@@ -78,7 +141,6 @@ export class JobScheduler {
         if (!isConnected) {
           logger.warn(`Account ${typedAccount.phone} disconnected, attempting reconnect...`);
 
-          // Fetch full account data for reconnection
           const { data: fullAccount } = await supabase
             .from('tg_accounts')
             .select('*')
@@ -90,7 +152,6 @@ export class JobScheduler {
           }
         }
 
-        // Emit status update
         this.wsHub.emitAccountStatus(typedAccount.id, typedAccount.status, isConnected);
       }
     } catch (error) {
@@ -121,5 +182,10 @@ export class JobScheduler {
   // Check if campaign is running
   isCampaignRunning(campaignId: string): boolean {
     return this.campaignService.isRunning(campaignId);
+  }
+
+  // Get queue statistics
+  getQueueStats() {
+    return messageQueue.getStats();
   }
 }

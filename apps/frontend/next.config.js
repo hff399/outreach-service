@@ -1,10 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'export',
-  trailingSlash: true,
   transpilePackages: ['@outreach/shared'],
   images: {
     unoptimized: true,
+  },
+  // Enable server-side features
+  experimental: {
+    serverComponentsExternalPackages: ['telegram', 'big-integer'],
   },
 };
 

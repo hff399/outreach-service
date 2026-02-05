@@ -2,6 +2,7 @@ import { supabase } from '../lib/supabase.js';
 import { createLogger } from '../lib/logger.js';
 import { TgAccountManager } from './tg-account-manager.js';
 import { WebSocketHub } from './websocket-hub.js';
+import { messageQueue, type CampaignMessagePayload } from './message-queue.js';
 import { applyTemplate } from '@outreach/shared/utils/index.js';
 import type { Campaign, TgGroup, MessageTemplate } from '@outreach/shared/types/entities.js';
 
@@ -27,17 +28,32 @@ export type CampaignStartResult = {
 export class CampaignService {
   private accountUsageCount: Map<string, number> = new Map();
   private runningCampaigns: Set<string> = new Set();
+  private campaignProgress: Map<string, { sent: number; failed: number; total: number }> = new Map();
 
   constructor(
     private tgManager: TgAccountManager,
     private wsHub: WebSocketHub
-  ) {}
+  ) {
+    // Listen for queue events to track progress
+    messageQueue.on('processed', (item) => {
+      if (item.type === 'campaign_message') {
+        const payload = item.payload as unknown as CampaignMessagePayload;
+        this.handleMessageSent(payload);
+      }
+    });
+
+    messageQueue.on('failed', (item) => {
+      if (item.type === 'campaign_message') {
+        const payload = item.payload as unknown as CampaignMessagePayload;
+        this.handleMessageFailed(payload, item.lastError || 'Unknown error');
+      }
+    });
+  }
 
   /**
    * Check if campaign can be started and return detailed info
    */
   async validateCampaign(campaignId: string): Promise<CampaignStartResult> {
-    // Fetch campaign with template
     const { data: campaign, error } = await supabase
       .from('campaigns')
       .select('*, message_templates(*)')
@@ -48,7 +64,6 @@ export class CampaignService {
       return { success: false, error: 'Campaign not found' };
     }
 
-    // Check for pending groups
     const { count: pendingGroupCount } = await supabase
       .from('campaign_groups')
       .select('*', { count: 'exact', head: true })
@@ -57,11 +72,9 @@ export class CampaignService {
 
     const totalGroups = pendingGroupCount || 0;
 
-    // Check for connected accounts
     const connectedAccounts = this.tgManager.getConnectedAccounts()
       .filter((id) => campaign.assigned_accounts?.includes(id));
 
-    // Check for message content
     const template = campaign.message_templates as MessageTemplate | null;
     const messageText = template?.content || campaign.custom_message || '';
     const hasMessage = !!messageText;
@@ -88,12 +101,12 @@ export class CampaignService {
   }
 
   /**
-   * Execute campaign - sends 1 message per group with configurable delays
+   * Execute campaign using the internal queue - much more robust
    */
-  async executeCampaign(campaignId: string): Promise<void> {
+  async executeCampaign(campaignId: string): Promise<{ queued: number; error?: string }> {
     if (this.runningCampaigns.has(campaignId)) {
       logger.warn(`Campaign ${campaignId} is already running`);
-      return;
+      return { queued: 0, error: 'Campaign already running' };
     }
 
     this.runningCampaigns.add(campaignId);
@@ -108,12 +121,12 @@ export class CampaignService {
 
       if (error || !campaign) {
         logger.error(`Campaign not found: ${campaignId}`);
-        return;
+        return { queued: 0, error: 'Campaign not found' };
       }
 
       if (campaign.status !== 'active') {
         logger.warn(`Campaign ${campaignId} is not active`);
-        return;
+        return { queued: 0, error: 'Campaign not active' };
       }
 
       const scheduleConfig = (campaign.schedule_config || {}) as ScheduleConfig;
@@ -123,18 +136,18 @@ export class CampaignService {
       if (groups.length === 0) {
         logger.info(`No groups remaining for campaign ${campaignId}`);
         await this.completeCampaign(campaignId);
-        return;
+        return { queued: 0, error: 'No groups remaining' };
       }
 
-      // Get available accounts (connected ones from assigned list)
+      // Get available accounts
       const connectedAccounts = this.tgManager.getConnectedAccounts()
-        .filter((id) => campaign.assigned_accounts.includes(id));
+        .filter((id) => campaign.assigned_accounts?.includes(id));
 
       if (connectedAccounts.length === 0) {
         logger.error(`No connected accounts for campaign ${campaignId}`);
         this.wsHub.emitCampaignStatus(campaignId, 'error', 'No connected accounts available');
         await supabase.from('campaigns').update({ status: 'paused' }).eq('id', campaignId);
-        return;
+        return { queued: 0, error: 'No connected accounts' };
       }
 
       const template = campaign.message_templates as MessageTemplate | null;
@@ -142,118 +155,160 @@ export class CampaignService {
 
       if (!messageText) {
         logger.error(`Campaign ${campaignId} has no message content`);
-        return;
+        return { queued: 0, error: 'No message content' };
       }
 
-      let messagesSent = 0;
-      let messagesFailed = 0;
-
-      // Calculate delay between messages (default 1 minute = 60 seconds)
+      // Calculate delays
       const minDelayMs = (scheduleConfig.min_delay_seconds || 60) * 1000;
-      const maxDelayMs = (scheduleConfig.max_delay_seconds || 120) * 1000;
+      const maxDelayMs = (scheduleConfig.max_delay_seconds || 180) * 1000;
       const randomizeDelay = scheduleConfig.randomize_delay !== false;
 
-      logger.info(`Starting campaign ${campaignId}: ${groups.length} groups, delay ${minDelayMs/1000}-${maxDelayMs/1000}s`);
+      // Reset account usage for rotation
+      this.accountUsageCount.clear();
+      connectedAccounts.forEach(id => this.accountUsageCount.set(id, 0));
+
+      // Initialize progress tracking
+      this.campaignProgress.set(campaignId, { sent: 0, failed: 0, total: groups.length });
+
+      logger.info(`Queueing campaign ${campaignId}: ${groups.length} groups, delay ${minDelayMs/1000}-${maxDelayMs/1000}s`);
 
       // Emit campaign started event
       this.wsHub.emitCampaignStatus(campaignId, 'running', `Sending to ${groups.length} groups`);
 
+      // Queue each message with appropriate delays
+      let cumulativeDelay = 0;
+      let queued = 0;
+
       for (let i = 0; i < groups.length; i++) {
         const group = groups[i];
 
-        // Check if campaign is still active
-        const { data: currentCampaign } = await supabase
-          .from('campaigns')
-          .select('status')
-          .eq('id', campaignId)
-          .single();
-
-        if (currentCampaign?.status !== 'active') {
-          logger.info(`Campaign ${campaignId} stopped`);
-          break;
-        }
-
         // Select account based on rotation strategy
         const accountId = this.selectAccount(connectedAccounts, scheduleConfig.account_rotation || 'round_robin');
+        this.incrementAccountUsage(accountId);
 
-        try {
-          // Apply template variables
-          const text = applyTemplate(messageText, {
-            group_name: group.title,
-          });
+        // Apply template variables
+        const text = applyTemplate(messageText, { group_name: group.title });
 
-          // Send message to group
-          await this.tgManager.sendToGroup(accountId, group.username || group.tg_id, text);
+        const payload: CampaignMessagePayload = {
+          campaignId,
+          groupId: group.id,
+          groupUsername: group.username || group.tg_id,
+          groupTitle: group.title,
+          accountId,
+          messageText: text,
+          templateVariables: { group_name: group.title },
+        };
 
-          // Update campaign_groups status
-          await supabase
-            .from('campaign_groups')
-            .update({
-              status: 'sent',
-              sent_at: new Date().toISOString(),
-            })
-            .eq('campaign_id', campaignId)
-            .eq('group_id', group.id);
+        // Queue with delay
+        messageQueue.enqueue('campaign_message', payload as unknown as Record<string, unknown>, {
+          priority: 5,
+          maxAttempts: 3,
+          delayMs: cumulativeDelay,
+        });
 
-          messagesSent++;
-          this.incrementAccountUsage(accountId);
+        queued++;
 
-          logger.info(`[${messagesSent}/${groups.length}] Sent to ${group.title} via account ${accountId.slice(0, 8)}`);
-
-          // Emit progress via WebSocket
-          this.wsHub.emitCampaignProgress(campaignId, {
-            campaign_id: campaignId,
-            total_groups: groups.length,
-            messages_sent: messagesSent,
-            messages_failed: messagesFailed,
-            current_group: group.title,
-            progress_percent: Math.round((messagesSent / groups.length) * 100),
-          });
-
-        } catch (error) {
-          logger.error(`Failed to send to group ${group.title}`, error);
-
-          await supabase
-            .from('campaign_groups')
-            .update({
-              status: 'failed',
-              error_message: (error as Error).message,
-            })
-            .eq('campaign_id', campaignId)
-            .eq('group_id', group.id);
-
-          messagesFailed++;
-        }
-
-        // Update campaign stats periodically
-        if (messagesSent % 5 === 0 || i === groups.length - 1) {
-          await this.updateCampaignStats(campaignId, groups.length, messagesSent, messagesFailed);
-        }
-
-        // Delay before next message (except for the last one)
+        // Calculate delay for next message
         if (i < groups.length - 1) {
           const delay = randomizeDelay
             ? this.randomBetween(minDelayMs, maxDelayMs)
             : minDelayMs;
-
-          logger.info(`Waiting ${Math.round(delay / 1000)}s before next message...`);
-          await this.sleep(delay);
+          cumulativeDelay += delay;
         }
       }
 
-      // Final stats update
-      await this.updateCampaignStats(campaignId, groups.length, messagesSent, messagesFailed);
+      logger.info(`Queued ${queued} messages for campaign ${campaignId}, total delay: ${Math.round(cumulativeDelay / 1000)}s`);
 
-      // Check if campaign is complete
-      const remainingGroups = await this.getTargetGroups(campaign as Campaign);
-      if (remainingGroups.length === 0) {
-        await this.completeCampaign(campaignId);
+      return { queued };
+
+    } catch (error) {
+      logger.error(`Failed to queue campaign ${campaignId}`, error);
+      return { queued: 0, error: (error as Error).message };
+    }
+  }
+
+  /**
+   * Handle successful message send
+   */
+  private async handleMessageSent(payload: CampaignMessagePayload): Promise<void> {
+    const { campaignId, groupId, groupTitle } = payload;
+
+    // Update campaign_groups status
+    await supabase
+      .from('campaign_groups')
+      .update({
+        status: 'sent',
+        sent_at: new Date().toISOString(),
+      })
+      .eq('campaign_id', campaignId)
+      .eq('group_id', groupId);
+
+    // Update progress
+    const progress = this.campaignProgress.get(campaignId);
+    if (progress) {
+      progress.sent++;
+
+      logger.info(`[${progress.sent}/${progress.total}] Sent to ${groupTitle}`);
+
+      // Emit WebSocket progress
+      this.wsHub.emitCampaignProgress(campaignId, {
+        campaign_id: campaignId,
+        total_groups: progress.total,
+        messages_sent: progress.sent,
+        messages_failed: progress.failed,
+        current_group: groupTitle,
+        progress_percent: Math.round((progress.sent / progress.total) * 100),
+      });
+
+      // Update campaign stats periodically
+      if (progress.sent % 5 === 0 || progress.sent + progress.failed >= progress.total) {
+        await this.updateCampaignStats(campaignId, progress.total, progress.sent, progress.failed);
       }
 
-      logger.info(`Campaign ${campaignId} batch completed: ${messagesSent} sent, ${messagesFailed} failed`);
+      // Check if campaign is complete
+      if (progress.sent + progress.failed >= progress.total) {
+        await this.completeCampaign(campaignId);
+      }
+    }
+  }
 
-    } finally {
-      this.runningCampaigns.delete(campaignId);
+  /**
+   * Handle failed message send
+   */
+  private async handleMessageFailed(payload: CampaignMessagePayload, error: string): Promise<void> {
+    const { campaignId, groupId, groupTitle } = payload;
+
+    // Update campaign_groups status
+    await supabase
+      .from('campaign_groups')
+      .update({
+        status: 'failed',
+        error_message: error,
+      })
+      .eq('campaign_id', campaignId)
+      .eq('group_id', groupId);
+
+    // Update progress
+    const progress = this.campaignProgress.get(campaignId);
+    if (progress) {
+      progress.failed++;
+
+      logger.error(`Failed to send to ${groupTitle}: ${error}`);
+
+      // Emit WebSocket progress
+      this.wsHub.emitCampaignProgress(campaignId, {
+        campaign_id: campaignId,
+        total_groups: progress.total,
+        messages_sent: progress.sent,
+        messages_failed: progress.failed,
+        current_group: groupTitle,
+        progress_percent: Math.round(((progress.sent + progress.failed) / progress.total) * 100),
+      });
+
+      // Check if campaign is complete
+      if (progress.sent + progress.failed >= progress.total) {
+        await this.completeCampaign(campaignId);
+      }
     }
   }
 
@@ -268,7 +323,6 @@ export class CampaignService {
         return accounts[Math.floor(Math.random() * accounts.length)];
 
       case 'least_used':
-        // Find account with lowest usage count
         let minUsage = Infinity;
         let leastUsedAccount = accounts[0];
         for (const accountId of accounts) {
@@ -282,7 +336,6 @@ export class CampaignService {
 
       case 'round_robin':
       default:
-        // Find account with lowest usage for round-robin effect
         const sorted = [...accounts].sort((a, b) => {
           const usageA = this.accountUsageCount.get(a) || 0;
           const usageB = this.accountUsageCount.get(b) || 0;
@@ -298,7 +351,6 @@ export class CampaignService {
   }
 
   private async getTargetGroups(campaign: Campaign): Promise<TgGroup[]> {
-    // First get groups from campaign_groups that haven't been sent yet
     const { data: campaignGroups } = await supabase
       .from('campaign_groups')
       .select('group_id')
@@ -350,15 +402,28 @@ export class CampaignService {
       .update({ status: 'completed' })
       .eq('id', campaignId);
 
+    this.runningCampaigns.delete(campaignId);
+    this.campaignProgress.delete(campaignId);
+
     logger.info(`Campaign ${campaignId} completed`);
     this.wsHub.emitCampaignStatus(campaignId, 'completed', 'All messages sent');
   }
 
   async pauseCampaign(campaignId: string): Promise<void> {
+    // Cancel all pending messages for this campaign
+    const cancelled = messageQueue.cancelAll({
+      type: 'campaign_message',
+      payloadMatch: { campaignId },
+    });
+
+    logger.info(`Paused campaign ${campaignId}, cancelled ${cancelled} pending messages`);
+
     await supabase
       .from('campaigns')
       .update({ status: 'paused' })
       .eq('id', campaignId);
+
+    this.runningCampaigns.delete(campaignId);
   }
 
   async resumeCampaign(campaignId: string): Promise<void> {
@@ -366,12 +431,21 @@ export class CampaignService {
       .from('campaigns')
       .update({ status: 'active' })
       .eq('id', campaignId);
+
+    // Re-execute to queue remaining groups
+    await this.executeCampaign(campaignId);
   }
 
   /**
    * Restart campaign - reset all groups to pending status
    */
   async restartCampaign(campaignId: string): Promise<{ reset: number }> {
+    // Cancel any pending messages
+    messageQueue.cancelAll({
+      type: 'campaign_message',
+      payloadMatch: { campaignId },
+    });
+
     // Reset all campaign_groups to pending
     const { data: updated } = await supabase
       .from('campaign_groups')
@@ -397,8 +471,10 @@ export class CampaignService {
       })
       .eq('id', campaignId);
 
-    // Clear account usage for this campaign
+    // Clear state
     this.accountUsageCount.clear();
+    this.runningCampaigns.delete(campaignId);
+    this.campaignProgress.delete(campaignId);
 
     const resetCount = updated?.length || 0;
     logger.info(`Campaign ${campaignId} restarted, reset ${resetCount} groups`);
@@ -413,11 +489,18 @@ export class CampaignService {
     return this.runningCampaigns.has(campaignId);
   }
 
-  private randomBetween(min: number, max: number): number {
-    return Math.floor(Math.random() * (max - min + 1)) + min;
+  /**
+   * Get campaign progress
+   */
+  getProgress(campaignId: string): { sent: number; failed: number; total: number; pending: number } | null {
+    const progress = this.campaignProgress.get(campaignId);
+    if (!progress) return null;
+
+    const pendingItems = messageQueue.getItemsByPayload({ campaignId });
+    return { ...progress, pending: pendingItems.length };
   }
 
-  private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  private randomBetween(min: number, max: number): number {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
   }
 }

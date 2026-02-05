@@ -1,5 +1,5 @@
-// In production, API is served from same origin. In dev, use NEXT_PUBLIC_BACKEND_URL.
-const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || '';
+// All API routes are served from Next.js API routes (same origin)
+const API_URL = '';
 
 type RequestOptions = {
   method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
@@ -61,7 +61,7 @@ export const accountsApi = {
   pollQrAuth: (id: string) => request<{ status: 'waiting' | 'success' | '2fa_required'; qrUrl?: string; expiresAt?: number }>(`/api/accounts/${id}/auth/qr/poll`, { method: 'POST' }),
   completeQr2FA: (id: string, password: string) => request<{ authenticated: boolean }>(`/api/accounts/${id}/auth/qr/2fa`, { method: 'POST', body: { password } }),
   reconnect: (id: string) => request<{ connected: boolean }>(`/api/accounts/${id}/reconnect`, { method: 'POST' }),
-  health: () => request<{ accounts: unknown[] }>('/api/accounts/health/all'),
+  health: () => request<{ accounts: unknown[] }>('/api/accounts/health'),
 };
 
 // Campaigns API
@@ -105,7 +105,7 @@ export const leadsApi = {
   updateStatus: (id: string, statusId: string) =>
     request<unknown>(`/api/leads/${id}/status`, { method: 'PATCH', body: { status_id: statusId } }),
   delete: (id: string) => request<null>(`/api/leads/${id}`, { method: 'DELETE' }),
-  stats: () => request<{ total: number; new_today: number; unresponded: number; by_status: unknown[] }>('/api/leads/stats/overview'),
+  stats: () => request<{ total: number; new_today: number; unresponded: number; by_status: unknown[] }>('/api/leads/stats'),
 };
 
 // Messages API
@@ -118,7 +118,7 @@ export const messagesApi = {
   markRead: (id: string) => request<unknown>(`/api/messages/${id}/read`, { method: 'POST' }),
   markAllRead: (leadId: string) => request<null>(`/api/messages/lead/${leadId}/read-all`, { method: 'POST' }),
   sendTyping: (leadId: string) => request<null>(`/api/messages/lead/${leadId}/typing`, { method: 'POST' }),
-  unreadCount: () => request<{ unread: number }>('/api/messages/unread/count'),
+  unreadCount: () => request<{ unread: number }>('/api/messages/unread'),
 };
 
 // Groups API
@@ -130,13 +130,13 @@ export const groupsApi = {
     );
   },
   get: (id: string) => request<unknown>(`/api/groups/${id}`),
-  import: (groups: unknown[]) => request<{ imported: number; groups: unknown[] }>('/api/groups/import', { method: 'POST', body: { groups } }),
+  import: (groups: unknown[]) => request<{ imported: number; groups: unknown[] }>('/api/groups', { method: 'POST', body: { groups } }),
   update: (id: string, data: unknown) => request<unknown>(`/api/groups/${id}`, { method: 'PATCH', body: data }),
   delete: (id: string) => request<null>(`/api/groups/${id}`, { method: 'DELETE' }),
   bulkDelete: (ids: string[]) => request<{ deleted: number }>('/api/groups/bulk-delete', { method: 'POST', body: { ids } }),
   bulkUpdate: (ids: string[], data: Record<string, unknown>) =>
     request<{ updated: number }>('/api/groups/bulk-update', { method: 'POST', body: { ids, ...data } }),
-  categories: () => request<string[]>('/api/groups/meta/categories'),
+  categories: () => request<string[]>('/api/groups/categories'),
 };
 
 // Templates API
