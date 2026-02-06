@@ -27,6 +27,28 @@ type Sequence = {
 
 export async function checkAndEnrollSequences(lead: Lead, messageText: string, accountId: string): Promise<void> {
   try {
+    // CRITICAL: Check if we have EVER sent an outgoing message to this lead
+    // If yes, do NOT trigger auto-reply - only trigger on TRUE FIRST CONTACT
+    const { data: existingOutgoing, error: outgoingError } = await supabase
+      .from('messages')
+      .select('id')
+      .eq('lead_id', lead.id)
+      .eq('direction', 'outgoing')
+      .limit(1);
+
+    if (outgoingError) {
+      logger.error('Failed to check outgoing messages', { error: outgoingError, leadId: lead.id });
+      return;
+    }
+
+    if (existingOutgoing && existingOutgoing.length > 0) {
+      // Lead has already received a message from us - don't auto-enroll
+      // Only handle as a reply (advance sequence if already enrolled)
+      logger.info('Lead already has outgoing messages, skipping auto-enrollment', { leadId: lead.id });
+      await handleLeadReply(lead.id);
+      return;
+    }
+
     const { data: sequences } = await supabase
       .from('sequences')
       .select('*')
