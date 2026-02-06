@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { generateId } from '@/lib/utils';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -19,6 +19,7 @@ import {
   UserCheck,
   Webhook,
   Clock,
+  Upload,
 } from 'lucide-react';
 import {
   Dialog,
@@ -134,6 +135,8 @@ const messageTypeLabels: Record<MessageType, string> = {
 export function CreateSequenceDialog({ open, onOpenChange }: CreateSequenceDialogProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingStepId, setUploadingStepId] = useState<string | null>(null);
 
   // Form state
   const [name, setName] = useState('');
@@ -342,6 +345,44 @@ export function CreateSequenceDialog({ open, onOpenChange }: CreateSequenceDialo
     updateStep(stepId, { [field]: currentTags.filter((t) => t !== tag) });
   };
 
+  const handleFileUpload = async (stepId: string, file: File) => {
+    const step = steps.find((s) => s.id === stepId);
+    if (!step) return;
+
+    setUploadingStepId(stepId);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      if (step.message_type === 'video_note') {
+        formData.append('video_note', 'true');
+      }
+
+      const response = await fetch('/api/uploads/media', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const result = await response.json();
+      if (result.success) {
+        updateStep(stepId, { content: result.data.path });
+        toast({ title: 'File uploaded', description: file.name });
+      } else {
+        toast({ title: 'Upload failed', description: result.error?.message || 'Unknown error', variant: 'destructive' });
+      }
+    } catch (error) {
+      toast({ title: 'Upload failed', description: (error as Error).message, variant: 'destructive' });
+    } finally {
+      setUploadingStepId(null);
+    }
+  };
+
+  const triggerFileUpload = (stepId: string) => {
+    if (fileInputRef.current) {
+      fileInputRef.current.dataset.stepId = stepId;
+      fileInputRef.current.click();
+    }
+  };
+
   const isStepValid = (step: Step): boolean => {
     switch (step.type) {
       case 'message':
@@ -405,11 +446,27 @@ export function CreateSequenceDialog({ open, onOpenChange }: CreateSequenceDialo
                   className="min-h-[80px]"
                 />
               ) : (
-                <Input
-                  placeholder={`Enter ${step.message_type} URL or file path...`}
-                  value={step.content || ''}
-                  onChange={(e) => updateStep(step.id, { content: e.target.value })}
-                />
+                <div className="flex gap-2">
+                  <Input
+                    placeholder={`Enter ${step.message_type} URL or file path...`}
+                    value={step.content || ''}
+                    onChange={(e) => updateStep(step.id, { content: e.target.value })}
+                    className="flex-1"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={() => triggerFileUpload(step.id)}
+                    disabled={uploadingStepId === step.id}
+                  >
+                    {uploadingStepId === step.id ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Upload className="h-4 w-4" />
+                    )}
+                  </Button>
+                </div>
               )}
             </div>
           </div>
@@ -680,6 +737,20 @@ export function CreateSequenceDialog({ open, onOpenChange }: CreateSequenceDialo
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <input
+          type="file"
+          ref={fileInputRef}
+          className="hidden"
+          accept="video/*,audio/*,image/*,.ogg,.mp4,.webm,.mp3,.wav"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            const stepId = e.target.dataset.stepId;
+            if (file && stepId) {
+              handleFileUpload(stepId, file);
+            }
+            e.target.value = '';
+          }}
+        />
         <DialogHeader>
           <DialogTitle>Create Auto-Responder Sequence</DialogTitle>
           <DialogDescription>

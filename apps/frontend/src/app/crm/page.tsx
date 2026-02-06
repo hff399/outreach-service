@@ -20,6 +20,7 @@ import {
   Clock,
   ChevronLeft,
   Info,
+  Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -40,6 +41,17 @@ import {
   SheetTitle,
   SheetTrigger,
 } from '@/components/ui/sheet';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
 import { MessageBubble } from '@/components/crm/message-bubble';
 import { VoiceRecorder } from '@/components/crm/voice-recorder';
 import { VideoRecorder } from '@/components/crm/video-recorder';
@@ -181,6 +193,27 @@ export default function CRMPage() {
       if (selectedLead) {
         setSelectedLead({ ...selectedLead, lead_statuses: (data as Lead).lead_statuses });
       }
+    },
+  });
+
+  // Delete lead
+  const deleteLeadMutation = useMutation({
+    mutationFn: (leadId: string) => leadsApi.delete(leadId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['leads'] });
+      queryClient.invalidateQueries({ queryKey: ['lead-stats'] });
+      setSelectedLead(null);
+      toast({
+        title: 'Lead deleted',
+        description: 'The lead has been permanently deleted',
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: 'Failed to delete lead',
+        description: error.message,
+        variant: 'destructive',
+      });
     },
   });
 
@@ -650,6 +683,35 @@ export default function CRMPage() {
                   <LeadInfoContent lead={selectedLead} />
                 </SheetContent>
               </Sheet>
+
+              {/* Delete lead */}
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="ghost" size="icon" className="text-destructive hover:text-destructive">
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Delete lead?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      Are you sure you want to delete {getLeadName(selectedLead)}? This action cannot be undone. All messages and data associated with this lead will be permanently deleted.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={() => deleteLeadMutation.mutate(selectedLead.id)}
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    >
+                      {deleteLeadMutation.isPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                      ) : null}
+                      Delete
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
 
               <Button
                 variant="ghost"
